@@ -1128,6 +1128,77 @@ function Show-DiffReviewForm {
     }
 }
 
+function Format-ElapsedTime {
+    param([TimeSpan]$Elapsed)
+    if ($null -eq $Elapsed) { return "не выполнялась" }
+    if ($Elapsed.TotalSeconds -lt 1) { return "меньше 1 сек" }
+    $hours = [int][Math]::Floor($Elapsed.TotalHours)
+    $mins = $Elapsed.Minutes
+    $secs = $Elapsed.Seconds
+    if ($hours -gt 0) { return ("{0} ч {1} мин {2} сек" -f $hours, $mins, $secs) }
+    if ($mins -gt 0) { return ("{0} мин {1} сек" -f $mins, $secs) }
+    return ("{0} сек" -f $secs)
+}
+
+function Format-DateTimeStamp {
+    param([datetime]$Value)
+    return $Value.ToString("dd.MM.yyyy HH:mm:ss")
+}
+
+function New-OpTiming {
+    param(
+        [datetime]$StartedAt,
+        [datetime]$EndedAt,
+        [TimeSpan]$Elapsed
+    )
+    if (-not $PSBoundParameters.ContainsKey("Elapsed")) {
+        $Elapsed = $EndedAt - $StartedAt
+    }
+    return [PSCustomObject]@{
+        StartedAt = $StartedAt
+        EndedAt   = $EndedAt
+        Elapsed   = $Elapsed
+    }
+}
+
+function Format-TimingSummary {
+    param(
+        $ConfigTiming,
+        $ExtensionsTiming,
+        $GitTiming
+    )
+
+    $fmt = {
+        param($timing)
+        if ($timing) { Format-ElapsedTime -Elapsed $timing.Elapsed } else { "не выполнялась" }
+    }
+
+    $lines = New-Object System.Collections.Generic.List[string]
+    $lines.Add("Выгрузка конфигурации: $( & $fmt $ConfigTiming )")
+    $lines.Add("Выгрузка расширений: $( & $fmt $ExtensionsTiming )")
+    $lines.Add("Синхронизация с Git: $( & $fmt $GitTiming )")
+
+    $performed = New-Object System.Collections.Generic.List[object]
+    if ($ConfigTiming) { [void]$performed.Add($ConfigTiming) }
+    if ($ExtensionsTiming) { [void]$performed.Add($ExtensionsTiming) }
+    if ($GitTiming) { [void]$performed.Add($GitTiming) }
+
+    if ($performed.Count -gt 0) {
+        $startedAt = $performed[0].StartedAt
+        $endedAt = $performed[0].EndedAt
+        foreach ($op in $performed) {
+            if ($op.StartedAt -lt $startedAt) { $startedAt = $op.StartedAt }
+            if ($op.EndedAt -gt $endedAt) { $endedAt = $op.EndedAt }
+        }
+        $lines.Add("")
+        $lines.Add("Всего: $(Format-ElapsedTime -Elapsed ($endedAt - $startedAt))")
+        $lines.Add("Начало: $(Format-DateTimeStamp -Value $startedAt)")
+        $lines.Add("Окончание: $(Format-DateTimeStamp -Value $endedAt)")
+    }
+
+    return ($lines -join "`r`n")
+}
+
 function Show-CompletionForm {
     param(
         [string]$Title,
@@ -1135,26 +1206,38 @@ function Show-CompletionForm {
         [switch]$ShowRepoButton
     )
 
+    $lineCount = @($Message -split "`r?`n").Count
+    $msgHeight = [Math]::Max(80, [Math]::Min(260, ($lineCount * 18) + 16))
+    $btnTop = 20 + $msgHeight + 16
+
     $form = New-Object System.Windows.Forms.Form
     $form.Text = $Title
-    $form.Width = 500
-    $form.Height = 210
+    $form.Width = 520
+    $form.Height = $btnTop + 80
     $form.StartPosition = "CenterScreen"
     $form.FormBorderStyle = "FixedDialog"
     $form.MaximizeBox = $false
     $form.MinimizeBox = $false
     $form.Font = New-Object System.Drawing.Font("Segoe UI", 9)
 
-    $lbl = New-Object System.Windows.Forms.Label
-    $lbl.Text = $Message
-    $lbl.Left = 20; $lbl.Top = 20; $lbl.Width = 440; $lbl.Height = 80
-    $form.Controls.Add($lbl)
+    $box = New-Object System.Windows.Forms.TextBox
+    $box.Multiline = $true
+    $box.ReadOnly = $true
+    $box.TabStop = $false
+    $box.BorderStyle = "None"
+    $box.BackColor = $form.BackColor
+    $box.Left = 20
+    $box.Top = 16
+    $box.Width = 460
+    $box.Height = $msgHeight
+    $box.Text = $Message
+    $form.Controls.Add($box)
 
     $x = 20
     if ($ShowRepoButton) {
         $btnRepo = New-Object System.Windows.Forms.Button
         $btnRepo.Text = "Открыть папку репозитория"
-        $btnRepo.Left = $x; $btnRepo.Top = 115; $btnRepo.Width = 190; $btnRepo.Height = 28
+        $btnRepo.Left = $x; $btnRepo.Top = $btnTop; $btnRepo.Width = 190; $btnRepo.Height = 28
         $btnRepo.Add_Click({
             if (Test-Path $GitRepo) { Invoke-Item $GitRepo }
         })
@@ -1164,7 +1247,7 @@ function Show-CompletionForm {
 
     $btnLog = New-Object System.Windows.Forms.Button
     $btnLog.Text = "Открыть лог"
-    $btnLog.Left = $x; $btnLog.Top = 115; $btnLog.Width = 110; $btnLog.Height = 28
+    $btnLog.Left = $x; $btnLog.Top = $btnTop; $btnLog.Width = 110; $btnLog.Height = 28
     $btnLog.Add_Click({
         $log = Join-Path $WorkDir "app.log"
         if (Test-Path $log) { Invoke-Item $log }
@@ -1173,7 +1256,7 @@ function Show-CompletionForm {
 
     $btnOk = New-Object System.Windows.Forms.Button
     $btnOk.Text = "OK"
-    $btnOk.Left = 375; $btnOk.Top = 115; $btnOk.Width = 90; $btnOk.Height = 28
+    $btnOk.Left = 395; $btnOk.Top = $btnTop; $btnOk.Width = 90; $btnOk.Height = 28
     $btnOk.DialogResult = [System.Windows.Forms.DialogResult]::OK
     $form.Controls.Add($btnOk)
     $form.AcceptButton = $btnOk
@@ -1930,6 +2013,10 @@ try {
     $doGitPublish = $Action -in @("all", "git")
     $doGitPrepare = $doGitPublish -or (($doMain -or $doExt) -and $GitRepoUrl)
 
+    $configTiming = $null
+    $extTiming = $null
+    $gitTiming = $null
+
     Show-ProgressForm
     Set-Status -Text "Начало работы..." -Percent 5
     Write-Log "Действие: $Action"
@@ -1941,12 +2028,17 @@ try {
     Write-Log "Выгрузка конфигурации: $doMain; расширения: $doExt; Git: $doGitPublish"
 
     if ($doGitPrepare) {
+        $gitPrepStart = Get-Date
         $EmbeddedGit = Join-Path $AppDir "PortableGit-64-bit.7z.exe"
         Initialize-PortableGit -EmbeddedArchive $EmbeddedGit
         Initialize-GitIdentity -GitExe $GitExe -GitHome $GitHome
         Initialize-GitRepository -GitExe $GitExe -RepoDir $GitRepo `
             -RemoteUrl $GitRepoUrl -Branch $GitBranch -GitHome $GitHome `
             -SkipPullIfDirty:($Action -eq "git")
+        $gitPrepEnd = Get-Date
+        if ($doGitPublish) {
+            $gitTiming = New-OpTiming -StartedAt $gitPrepStart -EndedAt $gitPrepEnd
+        }
     }
     elseif ($doMain -or $doExt) {
         if (-not (Test-Path $GitRepo)) {
@@ -1955,19 +2047,25 @@ try {
     }
 
     if ($doMain) {
+        $opStart = Get-Date
         Invoke-1CExport -Platform $PlatformPath -DBType $DBType -BasePath $InfobasePath `
             -User $1CUser -Password $1CPassword -OutputPath $ConfigExportPath `
             -ProgressFrom 45 -ProgressTo 65
+        $configTiming = New-OpTiming -StartedAt $opStart -EndedAt (Get-Date)
+        Write-Log ("Выгрузка конфигурации: {0}" -f (Format-ElapsedTime -Elapsed $configTiming.Elapsed))
     }
     elseif ($Action -eq "all") {
         Write-Log "Выгрузка основной конфигурации пропущена"
     }
 
     if ($doExt) {
+        $opStart = Get-Date
         Invoke-DumpExtensionsPipeline -Platform $PlatformPath -DBType $DBType `
             -BasePath $InfobasePath -User $1CUser -Password $1CPassword `
             -RepoDir $GitRepo -SelectManually $SelectExtensionsManually `
             -ExcludePrefix $ExtensionExcludePrefix
+        $extTiming = New-OpTiming -StartedAt $opStart -EndedAt (Get-Date)
+        Write-Log ("Выгрузка расширений: {0}" -f (Format-ElapsedTime -Elapsed $extTiming.Elapsed))
     }
     elseif ($Action -eq "all") {
         Write-Log "Выгрузка расширений отключена в настройках"
@@ -1976,8 +2074,18 @@ try {
     $publishResult = $null
     if ($doGitPublish) {
         Test-Cancelled
+        $opStart = Get-Date
         $publishResult = Invoke-GitPublish -GitExe $GitExe -RepoDir $GitRepo `
             -Branch $GitBranch -GitHome $GitHome -AutoConfirm:$AutoConfirmGitPush
+        $opEnd = Get-Date
+        if ($gitTiming) {
+            $gitTiming = New-OpTiming -StartedAt $gitTiming.StartedAt -EndedAt $opEnd `
+                -Elapsed ($gitTiming.Elapsed + ($opEnd - $opStart))
+        }
+        else {
+            $gitTiming = New-OpTiming -StartedAt $opStart -EndedAt $opEnd
+        }
+        Write-Log ("Синхронизация с Git: {0}" -f (Format-ElapsedTime -Elapsed $gitTiming.Elapsed))
     }
 
     Set-Status -Text "Готово!" -Percent 100
@@ -2008,6 +2116,13 @@ try {
             }
         }
     }
+
+    $timingText = Format-TimingSummary -ConfigTiming $configTiming `
+        -ExtensionsTiming $extTiming -GitTiming $gitTiming
+    foreach ($timingLine in ($timingText -split "`r`n")) {
+        if ($timingLine) { Write-Log $timingLine }
+    }
+    $doneMessage = $doneMessage + "`r`n`r`n" + $timingText
 
     Show-CompletionForm -Title "1C Git Sync" -Message $doneMessage -ShowRepoButton
 }
