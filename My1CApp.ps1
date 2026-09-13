@@ -157,7 +157,8 @@ function Invoke-CancellableProcess {
         [string]$ArgumentString = "",
         [string[]]$ArgumentList = $null,
         [string]$WorkingDirectory = "",
-        [switch]$IgnoreExitCode
+        [switch]$IgnoreExitCode,
+        [switch]$Quiet
     )
 
     Test-Cancelled
@@ -205,8 +206,10 @@ function Invoke-CancellableProcess {
         throw (New-Object System.OperationCanceledException("Операция отменена пользователем"))
     }
 
-    if ($Stdout) { Write-Log $Stdout.TrimEnd() }
-    if ($Stderr) { Write-Log $Stderr.TrimEnd() }
+    if (-not $Quiet) {
+        if ($Stdout) { Write-Log $Stdout.TrimEnd() }
+        if ($Stderr) { Write-Log $Stderr.TrimEnd() }
+    }
 
     $exitCode = $null
     try { $exitCode = $Proc.ExitCode } catch { }
@@ -227,7 +230,8 @@ function Invoke-Git {
         [string]$GitExe,
         [string[]]$GitArgs,
         [string]$WorkingDirectory = "",
-        [switch]$IgnoreExitCode
+        [switch]$IgnoreExitCode,
+        [switch]$Quiet
     )
 
     $params = @{
@@ -235,6 +239,7 @@ function Invoke-Git {
         ArgumentList       = $GitArgs
         WorkingDirectory   = $WorkingDirectory
         IgnoreExitCode     = $IgnoreExitCode
+        Quiet              = $Quiet
     }
     return Invoke-CancellableProcess @params
 }
@@ -242,8 +247,15 @@ function Invoke-Git {
 function Test-GitHeadExists {
     param([string]$GitExe, [string]$RepoDir)
     $r = Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
-        -GitArgs @("rev-parse", "--verify", "HEAD") -IgnoreExitCode
+        -GitArgs @("rev-parse", "--verify", "HEAD") -IgnoreExitCode -Quiet
     return ($r.ExitCode -eq 0)
+}
+
+function Initialize-GitUnbornBranch {
+    param([string]$GitExe, [string]$RepoDir, [string]$Branch)
+    Write-Log "Локальных коммитов нет — это первый коммит, ветка '$Branch'"
+    Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
+        -GitArgs @("symbolic-ref", "HEAD", "refs/heads/$Branch")
 }
 
 function Test-GitRemoteBranchExists {
@@ -253,11 +265,75 @@ function Test-GitRemoteBranchExists {
     return [bool]($ls.Stdout -and $ls.Stdout.Trim())
 }
 
-function Initialize-GitUnbornBranch {
-    param([string]$GitExe, [string]$RepoDir, [string]$Branch)
-    Write-Log "Локальных коммитов нет — это первый коммит, ветка '$Branch'"
-    Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
-        -GitArgs @("symbolic-ref", "HEAD", "refs/heads/$Branch")
+function ConvertTo-ComparableGitUrl {
+    param([string]$Url)
+    if (-not $Url) { return "" }
+    $u = $Url.Trim() -replace '\\', '/'
+    $u = $u.TrimEnd('/')
+    if ($u.EndsWith(".git", [System.StringComparison]::OrdinalIgnoreCase)) {
+        $u = $u.Substring(0, $u.Length - 4)
+    }
+    return $u.ToLowerInvariant()
+}
+
+function Get-GitOriginUrl {
+    param([string]$GitExe, [string]$RepoDir)
+    $r = Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
+        -GitArgs @("remote", "get-url", "origin") -IgnoreExitCode
+    if ($r.Stdout) { return $r.Stdout.Trim().Split("`n")[0].Trim() }
+    return ""
+}
+
+function Sync-GitOriginUrl {
+    param(
+        [string]$GitExe,
+        [string]$RepoDir,
+        [string]$RemoteUrl
+    )
+
+    if (-not (Test-Path (Join-Path $RepoDir ".git"))) { return }
+
+    $current = Get-GitOriginUrl -GitExe $GitExe -RepoDir $RepoDir
+    if (-not $current) {
+        Write-Log "У локального клона нет origin — добавляем $RemoteUrl"
+        Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
+            -GitArgs @("remote", "add", "origin", $RemoteUrl)
+        return
+    }
+
+    if ((ConvertTo-ComparableGitUrl -Url $current) -eq (ConvertTo-ComparableGitUrl -Url $RemoteUrl)) {
+        return
+    }
+
+    Write-Log "URL в настройках не совпадает с origin локального клона."
+    Write-Log "Было: $current"
+    Write-Log "Стало: $RemoteUrl"
+    Write-Log "Пересоздаём workdir\\repo под новый репозиторий..."
+
+    $parent = Split-Path -Parent $RepoDir
+    $backupName = "repo.bak-" + (Get-Date -Format "yyyyMMdd-HHmmss")
+    $backup = Join-Path $parent $backupName
+    Rename-Item -LiteralPath $RepoDir -NewName $backupName
+
+    try {
+        Invoke-Git -GitExe $GitExe -WorkingDirectory $parent `
+            -GitArgs @("clone", $RemoteUrl, $RepoDir)
+        Write-Log "Новый клон готов"
+        Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $backup) {
+            Write-Log "Старый клон не удалось удалить, остался как $backup"
+        }
+        else {
+            Write-Log "Старый клон удалён"
+        }
+    }
+    catch {
+        if (-not (Test-Path (Join-Path $RepoDir ".git")) -and (Test-Path -LiteralPath $backup)) {
+            Rename-Item -LiteralPath $backup -NewName (Split-Path -Leaf $RepoDir)
+            Write-Log "Клонирование не удалось, восстановлен прежний каталог repo"
+        }
+        throw
+    }
 }
 
 function Set-ProgressCancelEnabled {
@@ -1225,6 +1301,8 @@ function Initialize-GitRepository {
         }
         Invoke-Git -GitExe $GitExe -WorkingDirectory $WorkDir -GitArgs @("clone", $RemoteUrl, $RepoDir)
     }
+
+    Sync-GitOriginUrl -GitExe $GitExe -RepoDir $RepoDir -RemoteUrl $RemoteUrl
 
     Set-Status -Text "Подготовка ветки $Branch..." -Percent 35
     Write-Log "Подготовка ветки '$Branch'"
