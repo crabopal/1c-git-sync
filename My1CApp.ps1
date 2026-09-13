@@ -239,6 +239,27 @@ function Invoke-Git {
     return Invoke-CancellableProcess @params
 }
 
+function Test-GitHeadExists {
+    param([string]$GitExe, [string]$RepoDir)
+    $r = Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
+        -GitArgs @("rev-parse", "--verify", "HEAD") -IgnoreExitCode
+    return ($r.ExitCode -eq 0)
+}
+
+function Test-GitRemoteBranchExists {
+    param([string]$GitExe, [string]$RepoDir, [string]$Branch)
+    $ls = Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
+        -GitArgs @("ls-remote", "--heads", "origin", $Branch) -IgnoreExitCode
+    return [bool]($ls.Stdout -and $ls.Stdout.Trim())
+}
+
+function Initialize-GitUnbornBranch {
+    param([string]$GitExe, [string]$RepoDir, [string]$Branch)
+    Write-Log "Локальных коммитов нет — это первый коммит, ветка '$Branch'"
+    Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
+        -GitArgs @("symbolic-ref", "HEAD", "refs/heads/$Branch")
+}
+
 function Set-ProgressCancelEnabled {
     param([bool]$Enabled)
     if ($script:ProgressCancelButton) {
@@ -384,6 +405,7 @@ function Get-DefaultConfig {
         User                       = ""
         GitRepoUrl                 = ""
         GitBranch                  = "main"
+        AutoConfirmGitPush         = $false
         ExportMainConfig           = $true
         ExportExtensions           = $true
         SelectExtensionsManually   = $false
@@ -597,6 +619,22 @@ function Show-SettingsForm {
     $lblBranchHint.ForeColor = [System.Drawing.Color]::Gray
     $tabGit.Controls.Add($lblBranchHint)
 
+    $chkAutoPush = New-Object System.Windows.Forms.CheckBox
+    $chkAutoPush.Text = "Отправлять коммит без подтверждения"
+    $chkAutoPush.Left = $labelLeft
+    $chkAutoPush.Top = $topStart + ($rowHeight * 4) + 8
+    $chkAutoPush.Width = 500
+    $chkAutoPush.Checked = [bool]$Existing.AutoConfirmGitPush
+    $tabGit.Controls.Add($chkAutoPush)
+
+    $lblAutoPushHint = New-Object System.Windows.Forms.Label
+    $lblAutoPushHint.Text = "Если включено, окно со списком изменений не показывается: коммит и push выполняются сразу."
+    $lblAutoPushHint.Left = $labelLeft
+    $lblAutoPushHint.Top = $topStart + ($rowHeight * 5) + 10
+    $lblAutoPushHint.Width = 610; $lblAutoPushHint.Height = 36
+    $lblAutoPushHint.ForeColor = [System.Drawing.Color]::Gray
+    $tabGit.Controls.Add($lblAutoPushHint)
+
     # --- Вкладка «Выгрузка» ---
     $chkMain = New-Object System.Windows.Forms.CheckBox
     $chkMain.Text = "Основная конфигурация"
@@ -717,6 +755,7 @@ function Show-SettingsForm {
         Password                 = $tbPass.Text
         GitRepoUrl               = $tbRepo.Text.Trim()
         GitBranch                = $branch
+        AutoConfirmGitPush       = [bool]$chkAutoPush.Checked
         ExportMainConfig         = [bool]$chkMain.Checked
         ExportExtensions         = [bool]$chkExt.Checked
         SelectExtensionsManually = [bool]$chkManual.Checked
@@ -817,6 +856,7 @@ function Get-Config {
                 User                     = $cfg.User
                 GitRepoUrl               = $cfg.GitRepoUrl
                 GitBranch                = $cfg.GitBranch
+                AutoConfirmGitPush       = $cfg.AutoConfirmGitPush
                 ExportMainConfig         = $cfg.ExportMainConfig
                 ExportExtensions         = $cfg.ExportExtensions
                 SelectExtensionsManually = $cfg.SelectExtensionsManually
@@ -1186,26 +1226,29 @@ function Initialize-GitRepository {
         Invoke-Git -GitExe $GitExe -WorkingDirectory $WorkDir -GitArgs @("clone", $RemoteUrl, $RepoDir)
     }
 
-    Set-Status -Text "Переключение на ветку $Branch..." -Percent 35
+    Set-Status -Text "Подготовка ветки $Branch..." -Percent 35
     Write-Log "Подготовка ветки '$Branch'"
 
     Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir -GitArgs @("fetch", "origin") -IgnoreExitCode
 
-    $ls = Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
-        -GitArgs @("ls-remote", "--heads", "origin", $Branch) -IgnoreExitCode
-    $hasRemote = $ls.Stdout -and $ls.Stdout.Trim()
+    $hasHead = Test-GitHeadExists -GitExe $GitExe -RepoDir $RepoDir
+    $hasRemote = Test-GitRemoteBranchExists -GitExe $GitExe -RepoDir $RepoDir -Branch $Branch
 
-    $dirty = $false
-    if ($SkipPullIfDirty) {
-        $st = Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
-            -GitArgs @("status", "--porcelain") -IgnoreExitCode
-        if ($st.Stdout -and $st.Stdout.Trim()) {
-            $dirty = $true
-            Write-Log "Есть локальные изменения — git pull пропущен, чтобы не затереть выгрузку"
-        }
+    if (-not $hasHead) {
+        Initialize-GitUnbornBranch -GitExe $GitExe -RepoDir $RepoDir -Branch $Branch
     }
 
-    if ($hasRemote) {
+    if ($hasRemote -and $hasHead) {
+        $dirty = $false
+        if ($SkipPullIfDirty) {
+            $st = Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
+                -GitArgs @("status", "--porcelain") -IgnoreExitCode
+            if ($st.Stdout -and $st.Stdout.Trim()) {
+                $dirty = $true
+                Write-Log "Есть локальные изменения — git pull пропущен, чтобы не затереть выгрузку"
+            }
+        }
+
         Set-Status -Text "Переключение на ветку $Branch..." -Percent 38
         $co = Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
             -GitArgs @("checkout", $Branch) -IgnoreExitCode
@@ -1218,23 +1261,142 @@ function Initialize-GitRepository {
             Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir -GitArgs @("pull", "origin", $Branch)
         }
     }
+    elseif ($hasRemote -and -not $hasHead) {
+        Write-Log "Локально коммитов нет, на origin уже есть '$Branch' — забираем её"
+        Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
+            -GitArgs @("checkout", "-B", $Branch, "origin/$Branch")
+    }
     else {
-        Write-Log "Удалённая ветка '$Branch' ещё не создана (пустой репозиторий)"
-        $co = Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
-            -GitArgs @("checkout", "-B", $Branch) -IgnoreExitCode
-        if ($co.ExitCode -ne 0) {
-            Write-Log "Ветка будет создана при первом коммите"
-        }
+        Write-Log "Удалённая ветка '$Branch' ещё не создана — первый push её опубликует"
     }
 }
 
 # === ПУБЛИКАЦИЯ В GIT ===
+function Ensure-DumpGitIgnore {
+    param([string]$RepoDir)
+
+    $giPath = Join-Path $RepoDir ".gitignore"
+    $required = @(
+        "# Vendor parent configurations — .cf often exceeds GitLab/GitHub 100 MiB blob limit",
+        "/Config/Ext/ParentConfigurations/*.cf",
+        "*.cf"
+    )
+
+    $existing = @()
+    if (Test-Path -LiteralPath $giPath) {
+        $existing = @(Get-Content -LiteralPath $giPath -Encoding UTF8)
+    }
+
+    $toAdd = @()
+    foreach ($line in $required) {
+        if ($line.StartsWith("#")) { continue }
+        $found = $false
+        foreach ($have in $existing) {
+            if ($have.Trim() -eq $line) { $found = $true; break }
+        }
+        if (-not $found) { $toAdd += $line }
+    }
+
+    if ($toAdd.Count -eq 0) { return }
+
+    $block = @()
+    if ($existing.Count -gt 0 -and $existing[-1].Trim() -ne "") { $block += "" }
+    $block += $required[0]
+    $block += $toAdd
+    Add-Content -LiteralPath $giPath -Value $block -Encoding UTF8
+    Write-Log "Обновлён .gitignore: исключены файлы конфигурации поставщика (*.cf)"
+}
+
+function Undo-OversizedGitIndex {
+    param(
+        [string]$GitExe,
+        [string]$RepoDir,
+        [int]$MaxMiB = 95
+    )
+
+    $maxBytes = [int64]$MaxMiB * 1MB
+    $hasHead = Test-GitHeadExists -GitExe $GitExe -RepoDir $RepoDir
+    $listed = Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
+        -GitArgs @("-c", "core.quotepath=false", "diff", "--cached", "--name-only") -IgnoreExitCode
+    if (-not $listed.Stdout) { return @() }
+
+    $skipped = @()
+    $names = $listed.Stdout -split "`r?`n" | Where-Object { $_ -and $_.Trim() }
+    foreach ($rel in $names) {
+        $rel = $rel.Trim()
+        $full = Join-Path $RepoDir $rel
+        if (-not (Test-Path -LiteralPath $full)) { continue }
+        $len = (Get-Item -LiteralPath $full).Length
+        if ($len -le $maxBytes) { continue }
+
+        if ($hasHead) {
+            Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
+                -GitArgs @("reset", "-q", "HEAD", "--", $rel) -IgnoreExitCode | Out-Null
+        }
+        else {
+            Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
+                -GitArgs @("rm", "--cached", "-q", "--", $rel) -IgnoreExitCode | Out-Null
+        }
+        $miB = [math]::Round($len / 1MB, 1)
+        $line = "$rel ($miB MiB)"
+        Write-Log "Пропущен файл больше $MaxMiB МиБ (лимит GitLab): $line"
+        $skipped += $line
+    }
+    return ,$skipped
+}
+
+function Invoke-GitUnstageAll {
+    param([string]$GitExe, [string]$RepoDir)
+    if (Test-GitHeadExists -GitExe $GitExe -RepoDir $RepoDir) {
+        Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir -GitArgs @("reset") -IgnoreExitCode | Out-Null
+    }
+    else {
+        Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
+            -GitArgs @("rm", "-r", "--cached", "-q", ".") -IgnoreExitCode | Out-Null
+    }
+}
+
+function Invoke-GitPushBranch {
+    param(
+        [string]$GitExe,
+        [string]$RepoDir,
+        [string]$Branch,
+        [bool]$IsFirstCommit
+    )
+
+    if ($IsFirstCommit) {
+        Write-Log "Первый коммит: публикуем новую ветку origin/$Branch"
+    }
+    else {
+        Write-Log "Отправка в origin/$Branch"
+    }
+
+    $refspec = "HEAD:refs/heads/$Branch"
+    $push = Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
+        -GitArgs @("push", "-u", "origin", $refspec) -IgnoreExitCode
+
+    if ($push.ExitCode -eq 0) { return }
+
+    Write-Log "Push не прошёл (код $($push.ExitCode)). Проверяем удалённую ветку и повторяем."
+
+    $hasRemote = Test-GitRemoteBranchExists -GitExe $GitExe -RepoDir $RepoDir -Branch $Branch
+    if ($hasRemote) {
+        $env:GIT_MERGE_AUTOEDIT = "no"
+        Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
+            -GitArgs @("pull", "origin", $Branch, "--allow-unrelated-histories", "--no-edit")
+    }
+
+    Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
+        -GitArgs @("push", "-u", "origin", $refspec)
+}
+
 function Invoke-GitPublish {
     param(
         [string]$GitExe,
         [string]$RepoDir,
         [string]$Branch,
-        [string]$GitHome
+        [string]$GitHome,
+        [switch]$AutoConfirm
     )
 
     Test-Cancelled
@@ -1242,16 +1404,36 @@ function Invoke-GitPublish {
 
     if (-not $Branch) { $Branch = "main" }
 
+    Ensure-DumpGitIgnore -RepoDir $RepoDir
+
+    $isFirstCommit = -not (Test-GitHeadExists -GitExe $GitExe -RepoDir $RepoDir)
+    if ($isFirstCommit) {
+        Initialize-GitUnbornBranch -GitExe $GitExe -RepoDir $RepoDir -Branch $Branch
+        Write-Log "Режим первого коммита: pull не выполняется, ветка будет создана на сервере при push"
+    }
+
     Set-Status -Text "Добавление изменений в индекс..." -Percent 90
     Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir -GitArgs @("add", "-A")
+    $skippedHuge = Undo-OversizedGitIndex -GitExe $GitExe -RepoDir $RepoDir
 
     $statusResult = Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
         -GitArgs @("status", "--porcelain") -IgnoreExitCode
     $statusText = ""
     if ($statusResult.Stdout) { $statusText = $statusResult.Stdout.TrimEnd() }
 
-    if (-not $statusText) {
-        Write-Log "Нет изменений для коммита"
+    if ($skippedHuge.Count -gt 0) {
+        $skipBlock = "Пропущены файлы больше 95 МиБ:`r`n" + ($skippedHuge -join "`r`n")
+        if ($statusText) { $statusText = $skipBlock + "`r`n`r`n" + $statusText }
+        else { $statusText = $skipBlock }
+    }
+
+    if (-not $statusResult.Stdout -or -not $statusResult.Stdout.Trim()) {
+        if ($skippedHuge.Count -gt 0) {
+            Write-Log "После исключения крупных файлов изменений для коммита нет"
+        }
+        else {
+            Write-Log "Нет изменений для коммита"
+        }
         Set-Status -Text "Нет изменений для коммита" -Percent 98
         return "none"
     }
@@ -1263,18 +1445,24 @@ function Invoke-GitPublish {
 
     $defaultMsg = "Auto-update: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
 
-    Set-ProgressCancelEnabled -Enabled $false
-    $review = Show-DiffReviewForm -StatusText $statusText -StatText $statText -DefaultMessage $defaultMsg
-    Set-ProgressCancelEnabled -Enabled $true
-    Test-Cancelled
+    if ($AutoConfirm) {
+        Write-Log "Автоподтверждение коммита включено — окно ревью пропущено"
+        $review = [PSCustomObject]@{ Action = "push"; Message = $defaultMsg }
+    }
+    else {
+        Set-ProgressCancelEnabled -Enabled $false
+        $review = Show-DiffReviewForm -StatusText $statusText -StatText $statText -DefaultMessage $defaultMsg
+        Set-ProgressCancelEnabled -Enabled $true
+        Test-Cancelled
+    }
 
     switch ($review.Action) {
         "cancel" {
-            Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir -GitArgs @("reset") -IgnoreExitCode
+            Invoke-GitUnstageAll -GitExe $GitExe -RepoDir $RepoDir
             throw (New-Object System.OperationCanceledException("Операция отменена пользователем"))
         }
         "skip" {
-            Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir -GitArgs @("reset") -IgnoreExitCode
+            Invoke-GitUnstageAll -GitExe $GitExe -RepoDir $RepoDir
             Write-Log "Отправка в Git пропущена пользователем"
             Set-Status -Text "Изменения оставлены локально" -Percent 98
             return "skip"
@@ -1284,14 +1472,16 @@ function Invoke-GitPublish {
             $msg = $msg -replace '"', "'"
             Set-Status -Text "Коммит изменений..." -Percent 92
             Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir -GitArgs @("commit", "-m", $msg)
+            Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
+                -GitArgs @("branch", "-M", $Branch) -IgnoreExitCode | Out-Null
             Set-Status -Text "Отправка в удалённый репозиторий (git push)..." -Percent 95
-            Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir -GitArgs @("push", "-u", "origin", $Branch)
+            Invoke-GitPushBranch -GitExe $GitExe -RepoDir $RepoDir -Branch $Branch -IsFirstCommit $isFirstCommit
             Set-Status -Text "Синхронизация с Git завершена" -Percent 98
             Write-Log "Синхронизация с Git завершена"
             return "push"
         }
         default {
-            Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir -GitArgs @("reset") -IgnoreExitCode
+            Invoke-GitUnstageAll -GitExe $GitExe -RepoDir $RepoDir
             throw (New-Object System.OperationCanceledException("Операция отменена пользователем"))
         }
     }
@@ -1651,6 +1841,7 @@ try {
     $1CPassword                = $Config.Password
     $GitRepoUrl                = $Config.GitRepoUrl
     $GitBranch                 = $Config.GitBranch
+    $AutoConfirmGitPush        = [bool]$Config.AutoConfirmGitPush
     $ExportMainConfig          = [bool]$Config.ExportMainConfig
     $ExportExtensions          = [bool]$Config.ExportExtensions
     $SelectExtensionsManually  = [bool]$Config.SelectExtensionsManually
@@ -1708,7 +1899,7 @@ try {
     if ($doGitPublish) {
         Test-Cancelled
         $publishResult = Invoke-GitPublish -GitExe $GitExe -RepoDir $GitRepo `
-            -Branch $GitBranch -GitHome $GitHome
+            -Branch $GitBranch -GitHome $GitHome -AutoConfirm:$AutoConfirmGitPush
     }
 
     Set-Status -Text "Готово!" -Percent 100
