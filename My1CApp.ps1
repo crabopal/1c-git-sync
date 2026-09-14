@@ -46,10 +46,45 @@ $script:ProgressLabel         = $null
 $script:ProgressBar           = $null
 $script:ProgressLog           = $null
 $script:ProgressCancelButton  = $null
+$script:TimingBox             = $null
+$script:MainTabs              = $null
+$script:ActionButtons         = @()
 $script:CancelRequested       = $false
 $script:CurrentProcess        = $null
+$script:IsBusy                = $false
+$script:DumpWatchPath         = $null
+$script:DumpWatchTitle        = ""
+$script:DumpWatchStarted      = $null
+$script:DumpWatchLastPoll     = $null
+$script:Ui                    = @{}
 
 # === ЛОГИРОВАНИЕ ===
+function Get-AppLogPath {
+    return (Join-Path $WorkDir "app.log")
+}
+
+function Clear-OldLogEntries {
+    $logFile = Get-AppLogPath
+    if (-not (Test-Path -LiteralPath $logFile)) { return 0 }
+
+    $todayPrefix = "[" + (Get-Date -Format "yyyy-MM-dd") + " "
+    try {
+        $lines = @(Get-Content -LiteralPath $logFile -Encoding UTF8 -ErrorAction Stop)
+        $kept = @($lines | Where-Object { $_ -like ($todayPrefix + "*") })
+        if ($kept.Count -eq $lines.Count) { return 0 }
+        if ($kept.Count -eq 0) {
+            [System.IO.File]::WriteAllText($logFile, "")
+        }
+        else {
+            Set-Content -LiteralPath $logFile -Value $kept -Encoding UTF8
+        }
+        return ($lines.Count - $kept.Count)
+    }
+    catch {
+        return 0
+    }
+}
+
 function Write-Log {
     param([string]$Message, [string]$Level = "INFO")
     $Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
@@ -59,7 +94,7 @@ function Write-Log {
         if (-not (Test-Path $WorkDir)) {
             New-Item -ItemType Directory -Path $WorkDir -Force | Out-Null
         }
-        $LogFile = Join-Path $WorkDir "app.log"
+        $LogFile = Get-AppLogPath
         Add-Content -Path $LogFile -Value $LogLine -Encoding UTF8
     }
     catch { }
@@ -82,12 +117,72 @@ function Set-Status {
     [System.Windows.Forms.Application]::DoEvents()
 }
 
+function Format-DumpSize {
+    param([int64]$Bytes)
+    if ($Bytes -lt 1KB) { return "$Bytes Б" }
+    if ($Bytes -lt 1MB) { return ("{0} КБ" -f [int][Math]::Round($Bytes / 1KB)) }
+    if ($Bytes -lt 1GB) { return ("{0} МБ" -f [Math]::Round($Bytes / 1MB, 1)) }
+    return ("{0} ГБ" -f [Math]::Round($Bytes / 1GB, 2))
+}
+
+function Get-DumpWatchStats {
+    param([string]$Path)
+    $xmlCount = 0
+    $bytes = [int64]0
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path)) {
+        return [PSCustomObject]@{ XmlCount = 0; Bytes = [int64]0 }
+    }
+    try {
+        $files = [System.IO.Directory]::EnumerateFiles($Path, "*.xml", [System.IO.SearchOption]::AllDirectories)
+        foreach ($f in $files) {
+            $xmlCount++
+            try { $bytes += ([System.IO.FileInfo]$f).Length } catch { }
+        }
+    }
+    catch { }
+    return [PSCustomObject]@{ XmlCount = $xmlCount; Bytes = $bytes }
+}
+
+function Start-DumpWatch {
+    param([string]$Path, [string]$Title)
+    $script:DumpWatchPath = $Path
+    $script:DumpWatchTitle = $Title
+    $script:DumpWatchStarted = Get-Date
+    $script:DumpWatchLastPoll = [datetime]::MinValue
+}
+
+function Stop-DumpWatch {
+    $script:DumpWatchPath = $null
+    $script:DumpWatchTitle = ""
+    $script:DumpWatchStarted = $null
+    $script:DumpWatchLastPoll = $null
+}
+
+function Update-DumpWatchStatus {
+    if (-not $script:DumpWatchPath) { return }
+    $now = Get-Date
+    if ($script:DumpWatchLastPoll -and ($now - $script:DumpWatchLastPoll).TotalSeconds -lt 2) { return }
+    $script:DumpWatchLastPoll = $now
+
+    $stats = Get-DumpWatchStats -Path $script:DumpWatchPath
+    $elapsed = [TimeSpan]::Zero
+    if ($script:DumpWatchStarted) { $elapsed = $now - $script:DumpWatchStarted }
+    $countText = $stats.XmlCount.ToString("N0")
+    $title = $script:DumpWatchTitle
+    if (-not $title) { $title = "Выгрузка" }
+    Set-Status -Text ("{0} — {1}, {2} XML, {3}" -f $title, (Format-ElapsedTime -Elapsed $elapsed), $countText, (Format-DumpSize -Bytes $stats.Bytes))
+}
+
 function Initialize-WorkDir {
     if (-not (Test-Path $WorkDir)) {
         New-Item -ItemType Directory -Path $WorkDir -Force | Out-Null
     }
     if (-not (Test-Path $GitHome)) {
         New-Item -ItemType Directory -Path $GitHome -Force | Out-Null
+    }
+    $removed = Clear-OldLogEntries
+    if ($removed -gt 0) {
+        Write-Log "Журнал: удалено $removed записей за предыдущие дни"
     }
 }
 
@@ -123,6 +218,7 @@ function Wait-CancellableProcess {
     $script:CurrentProcess = $Process
     try {
         while (-not $Process.WaitForExit($PollMs)) {
+            Update-DumpWatchStatus
             [System.Windows.Forms.Application]::DoEvents()
             if ($script:CancelRequested) {
                 Stop-TrackedProcess -Proc $Process
@@ -187,6 +283,7 @@ function Invoke-CancellableProcess {
     $StderrTask = $Proc.StandardError.ReadToEndAsync()
 
     while (-not $Proc.WaitForExit(300)) {
+        Update-DumpWatchStatus
         [System.Windows.Forms.Application]::DoEvents()
         if ($script:CancelRequested) {
             Stop-TrackedProcess -Proc $Proc
@@ -305,30 +402,54 @@ function Sync-GitOriginUrl {
         return
     }
 
-    Write-Log "URL в настройках не совпадает с origin локального клона."
+    Write-Log "URL в настройках не совпадает с origin локального клона — меняем origin, файлы не удаляем."
     Write-Log "Было: $current"
     Write-Log "Стало: $RemoteUrl"
-    Write-Log "Пересоздаём workdir\\repo под новый репозиторий..."
+    Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
+        -GitArgs @("remote", "set-url", "origin", $RemoteUrl)
+    Write-Log "origin обновлён. Чтобы удалить локальные файлы и клонировать заново, нажмите «Начать с чистого клона»."
+}
 
+function Reset-GitLocalClone {
+    param(
+        [string]$GitExe,
+        [string]$RepoDir,
+        [string]$RemoteUrl
+    )
+
+    if (-not $RemoteUrl) {
+        throw "Не указан URL Git-репозитория"
+    }
+
+    Write-Log "Пересоздаём workdir\\repo под $RemoteUrl ..."
     $parent = Split-Path -Parent $RepoDir
-    $backupName = "repo.bak-" + (Get-Date -Format "yyyyMMdd-HHmmss")
-    $backup = Join-Path $parent $backupName
-    Rename-Item -LiteralPath $RepoDir -NewName $backupName
+    if (-not (Test-Path $parent)) {
+        New-Item -ItemType Directory -Path $parent -Force | Out-Null
+    }
+
+    $backup = $null
+    if (Test-Path -LiteralPath $RepoDir) {
+        $backupName = "repo.bak-" + (Get-Date -Format "yyyyMMdd-HHmmss")
+        $backup = Join-Path $parent $backupName
+        Rename-Item -LiteralPath $RepoDir -NewName $backupName
+    }
 
     try {
         Invoke-Git -GitExe $GitExe -WorkingDirectory $parent `
             -GitArgs @("clone", $RemoteUrl, $RepoDir)
         Write-Log "Новый клон готов"
-        Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction SilentlyContinue
-        if (Test-Path -LiteralPath $backup) {
-            Write-Log "Старый клон не удалось удалить, остался как $backup"
-        }
-        else {
-            Write-Log "Старый клон удалён"
+        if ($backup) {
+            Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction SilentlyContinue
+            if (Test-Path -LiteralPath $backup) {
+                Write-Log "Старый клон не удалось удалить, остался как $backup"
+            }
+            else {
+                Write-Log "Старый клон удалён"
+            }
         }
     }
     catch {
-        if (-not (Test-Path (Join-Path $RepoDir ".git")) -and (Test-Path -LiteralPath $backup)) {
+        if ($backup -and -not (Test-Path (Join-Path $RepoDir ".git")) -and (Test-Path -LiteralPath $backup)) {
             Rename-Item -LiteralPath $backup -NewName (Split-Path -Leaf $RepoDir)
             Write-Log "Клонирование не удалось, восстановлен прежний каталог repo"
         }
@@ -390,87 +511,36 @@ function Find-Latest1CPlatform {
 function Show-ProgressForm {
     $script:CancelRequested = $false
     $script:CurrentProcess = $null
-
-    $form = New-Object System.Windows.Forms.Form
-    $form.Text = "1C Git Sync - Выполняется"
-    $form.Width = 720
-    $form.Height = 560
-    $form.StartPosition = "CenterScreen"
-    $form.FormBorderStyle = "FixedDialog"
-    $form.MaximizeBox = $false
-    $form.MinimizeBox = $false
-    $form.ControlBox = $false
-    $form.Font = New-Object System.Drawing.Font("Segoe UI", 9)
-
-    $lblTitle = New-Object System.Windows.Forms.Label
-    $lblTitle.Text = "Текущий шаг:"
-    $lblTitle.Left = 15; $lblTitle.Top = 15; $lblTitle.Width = 100
-    $form.Controls.Add($lblTitle)
-
-    $lblStatus = New-Object System.Windows.Forms.Label
-    $lblStatus.Text = "Подготовка..."
-    $lblStatus.Left = 15; $lblStatus.Top = 35
-    $lblStatus.Width = 680; $lblStatus.Height = 22
-    $lblStatus.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
-    $form.Controls.Add($lblStatus)
-
-    $bar = New-Object System.Windows.Forms.ProgressBar
-    $bar.Left = 15; $bar.Top = 65
-    $bar.Width = 680; $bar.Height = 22
-    $bar.Minimum = 0; $bar.Maximum = 100; $bar.Value = 0
-    $form.Controls.Add($bar)
-
-    $lblLog = New-Object System.Windows.Forms.Label
-    $lblLog.Text = "Журнал:"
-    $lblLog.Left = 15; $lblLog.Top = 100; $lblLog.Width = 100
-    $form.Controls.Add($lblLog)
-
-    $txtLog = New-Object System.Windows.Forms.TextBox
-    $txtLog.Left = 15; $txtLog.Top = 120
-    $txtLog.Width = 680; $txtLog.Height = 330
-    $txtLog.Multiline = $true
-    $txtLog.ScrollBars = "Vertical"
-    $txtLog.ReadOnly = $true
-    $txtLog.Font = New-Object System.Drawing.Font("Consolas", 8)
-    $txtLog.BackColor = [System.Drawing.Color]::FromArgb(30, 30, 30)
-    $txtLog.ForeColor = [System.Drawing.Color]::LightGreen
-    $form.Controls.Add($txtLog)
-
-    $btnCancel = New-Object System.Windows.Forms.Button
-    $btnCancel.Text = "Отмена"
-    $btnCancel.Left = 605
-    $btnCancel.Top = 465
-    $btnCancel.Width = 90
-    $btnCancel.Height = 28
-    $btnCancel.Add_Click({
-        $script:CancelRequested = $true
-        $this.Enabled = $false
-        $this.Text = "Отмена..."
-        Write-Log "Запрошена отмена операции"
-        Stop-TrackedProcess -Proc $script:CurrentProcess
-    })
-    $form.Controls.Add($btnCancel)
-
-    $script:ProgressForm         = $form
-    $script:ProgressLabel        = $lblStatus
-    $script:ProgressBar          = $bar
-    $script:ProgressLog          = $txtLog
-    $script:ProgressCancelButton = $btnCancel
-
-    $form.Show()
+    if ($script:ProgressBar) { $script:ProgressBar.Value = 0 }
+    if ($script:ProgressCancelButton -and -not $script:ProgressCancelButton.IsDisposed) {
+        $script:ProgressCancelButton.Text = "Отмена"
+        $script:ProgressCancelButton.Enabled = $true
+    }
     [System.Windows.Forms.Application]::DoEvents()
 }
 
 function Close-ProgressForm {
-    if ($script:ProgressForm) {
-        $script:ProgressForm.Close()
-        $script:ProgressForm.Dispose()
-        $script:ProgressForm = $null
-        $script:ProgressLabel = $null
-        $script:ProgressBar = $null
-        $script:ProgressLog = $null
-        $script:ProgressCancelButton = $null
+    if ($script:ProgressCancelButton -and -not $script:ProgressCancelButton.IsDisposed) {
+        $script:ProgressCancelButton.Enabled = $false
+        $script:ProgressCancelButton.Text = "Отмена"
     }
+    [System.Windows.Forms.Application]::DoEvents()
+}
+
+function Set-MainFormBusy {
+    param([bool]$Busy)
+    $script:IsBusy = $Busy
+    if ($script:MainTabs -and -not $script:MainTabs.IsDisposed) {
+        $script:MainTabs.Enabled = -not $Busy
+    }
+    foreach ($btn in @($script:ActionButtons)) {
+        if ($btn -and -not $btn.IsDisposed) { $btn.Enabled = -not $Busy }
+    }
+    if ($script:ProgressCancelButton -and -not $script:ProgressCancelButton.IsDisposed) {
+        $script:ProgressCancelButton.Enabled = $Busy -and -not $script:CancelRequested
+        if (-not $Busy) { $script:ProgressCancelButton.Text = "Отмена" }
+    }
+    [System.Windows.Forms.Application]::DoEvents()
 }
 
 function Get-DefaultConfig {
@@ -486,6 +556,7 @@ function Get-DefaultConfig {
         ExportExtensions           = $true
         SelectExtensionsManually   = $false
         ExtensionExcludePrefix     = "EF_"
+        DumpMode                   = "Auto"
     }
 }
 
@@ -521,25 +592,26 @@ function Add-FormTextBox {
     return $tb
 }
 
-# === ФОРМА НАСТРОЕК ===
+# === ГЛАВНОЕ ОКНО ===
 function Show-SettingsForm {
     param([PSCustomObject]$Existing)
 
     $Existing = Merge-Config -Existing $Existing
 
     $form = New-Object System.Windows.Forms.Form
-    $form.Text = "1C Git Sync - Настройки"
-    $form.Width = 700
-    $form.Height = 600
+    $form.Text = "1C Git Sync"
+    $form.Width = 740
+    $form.Height = 880
     $form.StartPosition = "CenterScreen"
-    $form.FormBorderStyle = "FixedDialog"
-    $form.MaximizeBox = $false
-    $form.MinimizeBox = $false
+    $form.MinimumSize = New-Object System.Drawing.Size(740, 780)
+    $form.MaximizeBox = $true
+    $form.MinimizeBox = $true
     $form.Font = New-Object System.Drawing.Font("Segoe UI", 9)
 
     $tabs = New-Object System.Windows.Forms.TabControl
     $tabs.Left = 10; $tabs.Top = 10
-    $tabs.Width = 665; $tabs.Height = 430
+    $tabs.Width = 705; $tabs.Height = 360
+    $tabs.Anchor = "Top,Left,Right"
     $form.Controls.Add($tabs)
 
     $tab1C = New-Object System.Windows.Forms.TabPage
@@ -704,12 +776,28 @@ function Show-SettingsForm {
     $tabGit.Controls.Add($chkAutoPush)
 
     $lblAutoPushHint = New-Object System.Windows.Forms.Label
-    $lblAutoPushHint.Text = "Если включено, окно со списком изменений не показывается: коммит и push выполняются сразу."
+    $lblAutoPushHint.Text = "Если включено, окно со списком изменений не показывается: коммит и push выполняются сразу. Смена URL меняет origin без удаления файлов."
     $lblAutoPushHint.Left = $labelLeft
     $lblAutoPushHint.Top = $topStart + ($rowHeight * 5) + 10
-    $lblAutoPushHint.Width = 610; $lblAutoPushHint.Height = 36
+    $lblAutoPushHint.Width = 610; $lblAutoPushHint.Height = 40
     $lblAutoPushHint.ForeColor = [System.Drawing.Color]::Gray
     $tabGit.Controls.Add($lblAutoPushHint)
+
+    $btnCleanClone = New-Object System.Windows.Forms.Button
+    $btnCleanClone.Text = "Начать с чистого клона"
+    $btnCleanClone.Left = $labelLeft
+    $btnCleanClone.Top = $topStart + ($rowHeight * 7)
+    $btnCleanClone.Width = 210
+    $btnCleanClone.Height = 28
+    $tabGit.Controls.Add($btnCleanClone)
+
+    $lblCleanClone = New-Object System.Windows.Forms.Label
+    $lblCleanClone.Text = "Удалит локальную копию workdir\\repo и склонирует репозиторий заново."
+    $lblCleanClone.Left = $labelLeft + 220
+    $lblCleanClone.Top = $topStart + ($rowHeight * 7) + 4
+    $lblCleanClone.Width = 390; $lblCleanClone.Height = 36
+    $lblCleanClone.ForeColor = [System.Drawing.Color]::Gray
+    $tabGit.Controls.Add($lblCleanClone)
 
     # --- Вкладка «Выгрузка» ---
     $chkMain = New-Object System.Windows.Forms.CheckBox
@@ -739,103 +827,316 @@ function Show-SettingsForm {
     $tbPrefix = Add-FormTextBox -Parent $tabDump -Left $fieldLeft -Top ($topStart + ($rowHeight * 3)) -Width 160 -Value $prefixValue
 
     $lblPrefixHint = New-Object System.Windows.Forms.Label
-    $lblPrefixHint.Text = "Для кнопки «Выполнить всё» состав задают флажки выше. Отдельные кнопки внизу всегда делают только своё действие. Префикс и ручной выбор действуют при выгрузке расширений."
+    $lblPrefixHint.Text = "Для кнопки «Выполнить всё» состав задают флажки выше. Отдельные кнопки всегда делают только своё действие."
     $lblPrefixHint.Left = $labelLeft
     $lblPrefixHint.Top = $topStart + ($rowHeight * 4) + 8
-    $lblPrefixHint.Width = 610; $lblPrefixHint.Height = 50
+    $lblPrefixHint.Width = 610; $lblPrefixHint.Height = 36
     $lblPrefixHint.ForeColor = [System.Drawing.Color]::Gray
     $tabDump.Controls.Add($lblPrefixHint)
 
-    $form.Height = 600
-    $tabs.Height = 410
+    [void](Add-FormLabel -Parent $tabDump -Text "Режим выгрузки:" -Left $labelLeft -Top ($topStart + ($rowHeight * 6) + 3) -Width 210)
 
-    $chosen = @{ Action = $null }
+    $rbDumpAuto = New-Object System.Windows.Forms.RadioButton
+    $rbDumpAuto.Text = "Авто (полная, если каталог пустой)"
+    $rbDumpAuto.Left = $fieldLeft
+    $rbDumpAuto.Top = $topStart + ($rowHeight * 6)
+    $rbDumpAuto.Width = 380
+    $tabDump.Controls.Add($rbDumpAuto)
 
+    $rbDumpFull = New-Object System.Windows.Forms.RadioButton
+    $rbDumpFull.Text = "Полная (каталог очищается)"
+    $rbDumpFull.Left = $fieldLeft
+    $rbDumpFull.Top = $topStart + ($rowHeight * 7)
+    $rbDumpFull.Width = 380
+    $tabDump.Controls.Add($rbDumpFull)
+
+    $rbDumpInc = New-Object System.Windows.Forms.RadioButton
+    $rbDumpInc.Text = "Инкрементальная (-update)"
+    $rbDumpInc.Left = $fieldLeft
+    $rbDumpInc.Top = $topStart + ($rowHeight * 8)
+    $rbDumpInc.Width = 380
+    $tabDump.Controls.Add($rbDumpInc)
+
+    $dumpMode = [string]$Existing.DumpMode
+    if ($dumpMode -eq "Full") { $rbDumpFull.Checked = $true }
+    elseif ($dumpMode -eq "Incremental") { $rbDumpInc.Checked = $true }
+    else { $rbDumpAuto.Checked = $true }
+
+    $btnTop = 378
     $btnAll = New-Object System.Windows.Forms.Button
     $btnAll.Text = "Выполнить всё"
-    $btnAll.Left = 15; $btnAll.Top = 430; $btnAll.Width = 150; $btnAll.Height = 30
-    $btnAll.Add_Click({
-        $chosen.Action = "all"
-        $form.DialogResult = [System.Windows.Forms.DialogResult]::OK
-        $form.Close()
-    })
+    $btnAll.Left = 15; $btnAll.Top = $btnTop; $btnAll.Width = 130; $btnAll.Height = 30
+    $btnAll.Anchor = "Top,Left"
     $form.Controls.Add($btnAll)
-    $form.AcceptButton = $btnAll
 
     $btnConfig = New-Object System.Windows.Forms.Button
     $btnConfig.Text = "Конфигурация"
-    $btnConfig.Left = 175; $btnConfig.Top = 430; $btnConfig.Width = 130; $btnConfig.Height = 30
-    $btnConfig.Add_Click({
-        $chosen.Action = "config"
-        $form.DialogResult = [System.Windows.Forms.DialogResult]::OK
-        $form.Close()
-    })
+    $btnConfig.Left = 150; $btnConfig.Top = $btnTop; $btnConfig.Width = 115; $btnConfig.Height = 30
     $form.Controls.Add($btnConfig)
 
     $btnExt = New-Object System.Windows.Forms.Button
     $btnExt.Text = "Расширения"
-    $btnExt.Left = 315; $btnExt.Top = 430; $btnExt.Width = 120; $btnExt.Height = 30
-    $btnExt.Add_Click({
-        $chosen.Action = "extensions"
-        $form.DialogResult = [System.Windows.Forms.DialogResult]::OK
-        $form.Close()
-    })
+    $btnExt.Left = 270; $btnExt.Top = $btnTop; $btnExt.Width = 110; $btnExt.Height = 30
     $form.Controls.Add($btnExt)
 
     $btnGit = New-Object System.Windows.Forms.Button
     $btnGit.Text = "Синхронизация Git"
-    $btnGit.Left = 445; $btnGit.Top = 430; $btnGit.Width = 140; $btnGit.Height = 30
-    $btnGit.Add_Click({
-        $chosen.Action = "git"
-        $form.DialogResult = [System.Windows.Forms.DialogResult]::OK
-        $form.Close()
-    })
+    $btnGit.Left = 385; $btnGit.Top = $btnTop; $btnGit.Width = 145; $btnGit.Height = 30
     $form.Controls.Add($btnGit)
 
-    $btnCancel = New-Object System.Windows.Forms.Button
-    $btnCancel.Text = "Отмена"
-    $btnCancel.Left = 595; $btnCancel.Top = 430; $btnCancel.Width = 80; $btnCancel.Height = 30
-    $btnCancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
-    $form.Controls.Add($btnCancel)
-    $form.CancelButton = $btnCancel
+    $btnCancelOp = New-Object System.Windows.Forms.Button
+    $btnCancelOp.Text = "Отмена"
+    $btnCancelOp.Left = 620; $btnCancelOp.Top = $btnTop; $btnCancelOp.Width = 90; $btnCancelOp.Height = 30
+    $btnCancelOp.Enabled = $false
+    $btnCancelOp.Anchor = "Top,Right"
+    $btnCancelOp.Add_Click({
+        $script:CancelRequested = $true
+        $this.Enabled = $false
+        $this.Text = "Отмена..."
+        Write-Log "Запрошена отмена операции"
+        Stop-TrackedProcess -Proc $script:CurrentProcess
+    })
+    $form.Controls.Add($btnCancelOp)
 
-    $lblActions = New-Object System.Windows.Forms.Label
-    $lblActions.Text = "Выгрузить конфигурацию и расширения можно по отдельности. Git только отправит уже выгруженные файлы в выбранную ветку."
-    $lblActions.Left = 15; $lblActions.Top = 468; $lblActions.Width = 660; $lblActions.Height = 36
-    $lblActions.ForeColor = [System.Drawing.Color]::Gray
-    $form.Controls.Add($lblActions)
+    $txtTiming = New-Object System.Windows.Forms.TextBox
+    $txtTiming.Multiline = $true
+    $txtTiming.ReadOnly = $true
+    $txtTiming.TabStop = $false
+    $txtTiming.Left = 15
+    $txtTiming.Top = 416
+    $txtTiming.Width = 695
+    $txtTiming.Height = 88
+    $txtTiming.Anchor = "Top,Left,Right"
+    $txtTiming.Text = "Последняя операция ещё не выполнялась."
+    $form.Controls.Add($txtTiming)
 
-    $result = $form.ShowDialog()
-    if ($result -ne [System.Windows.Forms.DialogResult]::OK -or -not $chosen.Action) {
-        return $null
+    $lblStatus = New-Object System.Windows.Forms.Label
+    $lblStatus.Text = "Готово к запуску"
+    $lblStatus.Left = 15; $lblStatus.Top = 512
+    $lblStatus.Width = 695; $lblStatus.Height = 22
+    $lblStatus.Anchor = "Top,Left,Right"
+    $lblStatus.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+    $form.Controls.Add($lblStatus)
+
+    $bar = New-Object System.Windows.Forms.ProgressBar
+    $bar.Left = 15; $bar.Top = 536
+    $bar.Width = 695; $bar.Height = 18
+    $bar.Anchor = "Top,Left,Right"
+    $bar.Minimum = 0; $bar.Maximum = 100; $bar.Value = 0
+    $form.Controls.Add($bar)
+
+    $lblLog = New-Object System.Windows.Forms.Label
+    $lblLog.Text = "Журнал:"
+    $lblLog.Left = 15; $lblLog.Top = 560; $lblLog.Width = 100
+    $lblLog.Anchor = "Top,Left"
+    $form.Controls.Add($lblLog)
+
+    $txtLog = New-Object System.Windows.Forms.TextBox
+    $txtLog.Left = 15; $txtLog.Top = 580
+    $txtLog.Width = 695; $txtLog.Height = 230
+    $txtLog.Anchor = "Top,Bottom,Left,Right"
+    $txtLog.Multiline = $true
+    $txtLog.ScrollBars = "Vertical"
+    $txtLog.ReadOnly = $true
+    $txtLog.Font = New-Object System.Drawing.Font("Consolas", 8)
+    $txtLog.BackColor = [System.Drawing.Color]::FromArgb(30, 30, 30)
+    $txtLog.ForeColor = [System.Drawing.Color]::LightGreen
+    $form.Controls.Add($txtLog)
+
+    $script:Ui = @{
+        Form          = $form
+        RbServer      = $rbServer
+        TbServerHost  = $tbServerHost
+        TbServerBase  = $tbServerBase
+        TbFileBase    = $tbFileBase
+        TbPlatform    = $tbPlatform
+        TbUser        = $tbUser
+        TbPass        = $tbPass
+        TbRepo        = $tbRepo
+        TbBranch      = $tbBranch
+        ChkAutoPush   = $chkAutoPush
+        ChkMain       = $chkMain
+        ChkExt        = $chkExt
+        ChkManual     = $chkManual
+        TbPrefix      = $tbPrefix
+        RbDumpAuto    = $rbDumpAuto
+        RbDumpFull    = $rbDumpFull
+        RbDumpInc     = $rbDumpInc
     }
 
-    if ($rbServer.Checked) {
+    $script:ProgressForm         = $form
+    $script:ProgressLabel        = $lblStatus
+    $script:ProgressBar          = $bar
+    $script:ProgressLog          = $txtLog
+    $script:ProgressCancelButton = $btnCancelOp
+    $script:TimingBox            = $txtTiming
+    $script:MainTabs             = $tabs
+    $script:ActionButtons        = @($btnAll, $btnConfig, $btnExt, $btnGit, $btnCleanClone)
+
+    $btnAll.Add_Click({ Start-UiAction -Action "all" })
+    $btnConfig.Add_Click({ Start-UiAction -Action "config" })
+    $btnExt.Add_Click({ Start-UiAction -Action "extensions" })
+    $btnGit.Add_Click({ Start-UiAction -Action "git" })
+    $btnCleanClone.Add_Click({ Start-UiAction -Action "reclone" })
+
+    $form.Add_FormClosing({
+        if ($script:IsBusy) {
+            $_.Cancel = $true
+            [System.Windows.Forms.MessageBox]::Show(
+                "Дождитесь окончания операции или нажмите «Отмена».",
+                "1C Git Sync",
+                [System.Windows.Forms.MessageBoxButtons]::OK,
+                [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+        }
+    })
+
+    $form.Add_Shown({
+        $logFile = Get-AppLogPath
+        if ((Test-Path -LiteralPath $logFile) -and $script:ProgressLog) {
+            try {
+                $existingLog = Get-Content -LiteralPath $logFile -Encoding UTF8 -ErrorAction Stop
+                if ($existingLog) {
+                    $script:ProgressLog.Text = (($existingLog | Select-Object -Last 200) -join "`r`n") + "`r`n"
+                    $script:ProgressLog.SelectionStart = $script:ProgressLog.Text.Length
+                    $script:ProgressLog.ScrollToCaret()
+                }
+            }
+            catch { }
+        }
+        Write-Log "Приложение запущено"
+        Set-Status -Text "Готово к запуску" -Percent 0
+    })
+
+    [void]$form.ShowDialog()
+}
+
+function Read-UiConfig {
+    param([string]$Action)
+
+    $ui = $script:Ui
+    if ($ui.RbServer.Checked) {
         $DbType = "Server"
-        $InfobasePath = "$($tbServerHost.Text.Trim())\$($tbServerBase.Text.Trim())"
+        $InfobasePath = "$($ui.TbServerHost.Text.Trim())\$($ui.TbServerBase.Text.Trim())"
     }
     else {
         $DbType = "File"
-        $InfobasePath = $tbFileBase.Text.Trim()
+        $InfobasePath = $ui.TbFileBase.Text.Trim()
     }
 
-    $branch = $tbBranch.Text.Trim()
+    $branch = $ui.TbBranch.Text.Trim()
     if (-not $branch) { $branch = "main" }
 
+    $dumpMode = "Auto"
+    if ($ui.RbDumpFull.Checked) { $dumpMode = "Full" }
+    elseif ($ui.RbDumpInc.Checked) { $dumpMode = "Incremental" }
+
     return [PSCustomObject]@{
-        Action                   = $chosen.Action
-        PlatformPath             = $tbPlatform.Text.Trim()
+        Action                   = $Action
+        PlatformPath             = $ui.TbPlatform.Text.Trim()
         DBType                   = $DbType
         InfobasePath             = $InfobasePath
-        User                     = $tbUser.Text.Trim()
-        Password                 = $tbPass.Text
-        GitRepoUrl               = $tbRepo.Text.Trim()
+        User                     = $ui.TbUser.Text.Trim()
+        Password                 = $ui.TbPass.Text
+        GitRepoUrl               = $ui.TbRepo.Text.Trim()
         GitBranch                = $branch
-        AutoConfirmGitPush       = [bool]$chkAutoPush.Checked
-        ExportMainConfig         = [bool]$chkMain.Checked
-        ExportExtensions         = [bool]$chkExt.Checked
-        SelectExtensionsManually = [bool]$chkManual.Checked
-        ExtensionExcludePrefix   = $tbPrefix.Text.Trim()
+        AutoConfirmGitPush       = [bool]$ui.ChkAutoPush.Checked
+        ExportMainConfig         = [bool]$ui.ChkMain.Checked
+        ExportExtensions         = [bool]$ui.ChkExt.Checked
+        SelectExtensionsManually = [bool]$ui.ChkManual.Checked
+        ExtensionExcludePrefix   = $ui.TbPrefix.Text.Trim()
+        DumpMode                 = $dumpMode
+    }
+}
+
+function Save-AppConfig {
+    param($Config)
+    $saved = [PSCustomObject]@{
+        PlatformPath             = $Config.PlatformPath
+        DBType                   = $Config.DBType
+        InfobasePath             = $Config.InfobasePath
+        User                     = $Config.User
+        GitRepoUrl               = $Config.GitRepoUrl
+        GitBranch                = $Config.GitBranch
+        AutoConfirmGitPush       = $Config.AutoConfirmGitPush
+        ExportMainConfig         = $Config.ExportMainConfig
+        ExportExtensions         = $Config.ExportExtensions
+        SelectExtensionsManually = $Config.SelectExtensionsManually
+        ExtensionExcludePrefix   = $Config.ExtensionExcludePrefix
+        DumpMode                 = $Config.DumpMode
+    }
+    $saved | ConvertTo-Json | Set-Content -Path $ConfigPath -Encoding UTF8
+}
+
+function Load-SavedConfig {
+    $existing = Get-DefaultConfig
+    if (Test-Path $ConfigPath) {
+        try {
+            $json = Get-Content -Path $ConfigPath -Raw -Encoding UTF8
+            $existing = Merge-Config -Existing ($json | ConvertFrom-Json)
+        }
+        catch {
+            Write-Host "Не удалось прочитать config.json: $_"
+        }
+    }
+    return $existing
+}
+
+function Set-TimingSummaryText {
+    param([string]$Text)
+    if ($script:TimingBox -and -not $script:TimingBox.IsDisposed) {
+        $script:TimingBox.Text = $Text
+    }
+}
+
+function Start-UiAction {
+    param([string]$Action)
+    if ($script:IsBusy) { return }
+
+    $cfg = Read-UiConfig -Action $Action
+    $errors = Test-Config -Config $cfg
+    if ($errors.Count -gt 0) {
+        $msg = "Обнаружены ошибки:`r`n`r`n" + ($errors -join "`r`n")
+        [System.Windows.Forms.MessageBox]::Show(
+            $msg, "Проверьте настройки",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+        return
+    }
+
+    if ($Action -eq "reclone") {
+        $answer = [System.Windows.Forms.MessageBox]::Show(
+            "Локальная копия workdir\repo будет удалена и склонирована заново из:`r`n$($cfg.GitRepoUrl)`r`n`r`nПродолжить?",
+            "Чистый клон",
+            [System.Windows.Forms.MessageBoxButtons]::YesNo,
+            [System.Windows.Forms.MessageBoxIcon]::Warning)
+        if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+    }
+
+    Save-AppConfig -Config $cfg
+    Set-MainFormBusy -Busy $true
+    try {
+        Invoke-SyncPipeline -Config $cfg
+    }
+    catch [System.OperationCanceledException] {
+        Write-Log "Операция отменена пользователем"
+        Set-Status -Text "Операция отменена" -Percent 100
+        Set-TimingSummaryText -Text "Последняя операция отменена $(Get-Date -Format 'dd.MM.yyyy HH:mm:ss')"
+    }
+    catch {
+        Write-Log "КРИТИЧЕСКАЯ ОШИБКА: $_" "ERROR"
+        Set-Status -Text "Ошибка: $_" -Percent 100
+        Set-TimingSummaryText -Text "Ошибка: $_"
+        [System.Windows.Forms.MessageBox]::Show(
+            "Ошибка:`r`n`r`n$_`r`n`r`nПодробности в журнале.",
+            "1C Git Sync",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+    }
+    finally {
+        Stop-DumpWatch
+        Close-ProgressForm
+        Set-MainFormBusy -Busy $false
+        Set-Status -Text "Готово к запуску"
     }
 }
 
@@ -848,7 +1149,7 @@ function Test-Config {
     if (-not $action) { $action = "all" }
 
     $need1C = $action -in @("all", "config", "extensions")
-    $needGit = $action -in @("all", "git")
+    $needGit = $action -in @("all", "git", "reclone")
 
     if ($need1C) {
         if (-not $Config.PlatformPath) {
@@ -905,51 +1206,7 @@ function Test-Config {
 
 # === КОНФИГ: ЧТЕНИЕ И СОХРАНЕНИЕ ===
 function Get-Config {
-    $existing = Get-DefaultConfig
-
-    if (Test-Path $ConfigPath) {
-        try {
-            $json = Get-Content -Path $ConfigPath -Raw -Encoding UTF8
-            $existing = Merge-Config -Existing ($json | ConvertFrom-Json)
-        }
-        catch {
-            Write-Host "Не удалось прочитать config.json: $_"
-        }
-    }
-
-    while ($true) {
-        $cfg = Show-SettingsForm -Existing $existing
-        if ($null -eq $cfg) {
-            exit 0
-        }
-
-        $errors = Test-Config -Config $cfg
-        if ($errors.Count -eq 0) {
-            $saved = [PSCustomObject]@{
-                PlatformPath             = $cfg.PlatformPath
-                DBType                   = $cfg.DBType
-                InfobasePath             = $cfg.InfobasePath
-                User                     = $cfg.User
-                GitRepoUrl               = $cfg.GitRepoUrl
-                GitBranch                = $cfg.GitBranch
-                AutoConfirmGitPush       = $cfg.AutoConfirmGitPush
-                ExportMainConfig         = $cfg.ExportMainConfig
-                ExportExtensions         = $cfg.ExportExtensions
-                SelectExtensionsManually = $cfg.SelectExtensionsManually
-                ExtensionExcludePrefix   = $cfg.ExtensionExcludePrefix
-            }
-            $saved | ConvertTo-Json | Set-Content -Path $ConfigPath -Encoding UTF8
-            return $cfg
-        }
-
-        $msg = "Обнаружены ошибки:`r`n`r`n" + ($errors -join "`r`n")
-        [System.Windows.Forms.MessageBox]::Show(
-            $msg, "Проверьте настройки",
-            [System.Windows.Forms.MessageBoxButtons]::OK,
-            [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
-
-        $existing = $cfg
-    }
+    return Load-SavedConfig
 }
 
 function Test-NameHasPrefix {
@@ -1551,12 +1808,82 @@ function Invoke-GitPushBranch {
         -GitArgs @("push", "-u", "origin", $refspec)
 }
 
+function Get-ConfigShortName {
+    param([string]$Name)
+    if (-not $Name) { return "" }
+    $map = @{
+        "КомплекснаяАвтоматизация"     = "КА"
+        "УправлениеТорговлей"          = "УТ"
+        "БухгалтерияПредприятия"       = "БП"
+        "ЗарплатаИУправлениеПерсоналом" = "ЗУП"
+        "УправлениеНашейФирмой"        = "УНФ"
+        "ERPУправлениеПредприятием"    = "ERP"
+        "УправлениеПредприятием"       = "ERP"
+        "ДокументооборотКОРП"          = "ДО"
+        "Документооборот"              = "ДО"
+    }
+    if ($map.ContainsKey($Name)) { return $map[$Name] }
+    return $Name
+}
+
+function Get-InfobaseDisplayName {
+    param([string]$InfobasePath)
+    if (-not $InfobasePath) { return "" }
+    $trimmed = $InfobasePath.Trim().TrimEnd("\", "/")
+    if ($trimmed -match '[\\/]([^\\/]+)$') { return $Matches[1] }
+    return $trimmed
+}
+
+function Get-ConfigurationDumpMeta {
+    param([string]$ConfigXmlPath)
+    $result = [PSCustomObject]@{ Name = ""; Version = "" }
+    if (-not $ConfigXmlPath -or -not (Test-Path -LiteralPath $ConfigXmlPath)) { return $result }
+    try {
+        $text = [System.IO.File]::ReadAllText($ConfigXmlPath)
+        if ($text -match '(?s)<Properties>.*?<Name>([^<]+)</Name>') {
+            $result.Name = $Matches[1].Trim()
+        }
+        if ($text -match '(?s)<Properties>.*?<Version>([^<]*)</Version>') {
+            $result.Version = $Matches[1].Trim()
+        }
+    }
+    catch { }
+    return $result
+}
+
+function New-GitCommitMessage {
+    param(
+        [string]$RepoDir,
+        [string]$InfobasePath
+    )
+
+    $date = Get-Date -Format "yyyy-MM-dd"
+    $xmlPath = Join-Path $RepoDir "Config\Configuration.xml"
+    $meta = Get-ConfigurationDumpMeta -ConfigXmlPath $xmlPath
+    $short = Get-ConfigShortName -Name $meta.Name
+    $ib = Get-InfobaseDisplayName -InfobasePath $InfobasePath
+
+    $headParts = @()
+    if ($short) { $headParts += $short }
+    if ($meta.Version) { $headParts += $meta.Version }
+    $head = ($headParts -join " ")
+
+    $tailParts = @()
+    if ($ib) { $tailParts += $ib }
+    $tailParts += $date
+    $tail = ($tailParts -join ", ")
+
+    if ($head) { return "$head, $tail" }
+    return "Auto-update: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+}
+
 function Invoke-GitPublish {
     param(
         [string]$GitExe,
         [string]$RepoDir,
         [string]$Branch,
         [string]$GitHome,
+        [string]$InfobasePath = "",
         [switch]$AutoConfirm
     )
 
@@ -1604,7 +1931,7 @@ function Invoke-GitPublish {
     $statText = ""
     if ($statResult.Stdout) { $statText = $statResult.Stdout.TrimEnd() }
 
-    $defaultMsg = "Auto-update: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+    $defaultMsg = New-GitCommitMessage -RepoDir $RepoDir -InfobasePath $InfobasePath
 
     if ($AutoConfirm) {
         Write-Log "Автоподтверждение коммита включено — окно ревью пропущено"
@@ -1832,6 +2159,35 @@ function Invoke-1CDesigner {
 }
 
 # === ВЫГРУЗКА 1С В ФАЙЛЫ ===
+function Test-DumpCatalogReady {
+    param([string]$Path)
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return $false }
+    return (Test-Path -LiteralPath (Join-Path $Path "Configuration.xml"))
+}
+
+function Resolve-UseIncrementalDump {
+    param(
+        [string]$DumpMode,
+        [string]$OutputPath
+    )
+
+    $mode = [string]$DumpMode
+    if (-not $mode) { $mode = "Auto" }
+    $ready = Test-DumpCatalogReady -Path $OutputPath
+
+    switch ($mode) {
+        "Full" { return $false }
+        "Incremental" {
+            if ($ready) { return $true }
+            Write-Log "Инкрементальная выгрузка невозможна — нет Configuration.xml. Будет полная выгрузка."
+            return $false
+        }
+        default {
+            return [bool]$ready
+        }
+    }
+}
+
 function Invoke-1CExport {
     param(
         [string]$Platform,
@@ -1841,37 +2197,78 @@ function Invoke-1CExport {
         [string]$Password,
         [string]$OutputPath,
         [string]$Extension = $null,
+        [string]$DumpMode = "Auto",
         [int]$ProgressFrom = 40,
         [int]$ProgressTo   = 80
     )
 
     Test-Cancelled
-    Clear-ExportPath -Path $OutputPath
 
-    $short = Enter-ShortDumpPath -TargetPath $OutputPath
-    $dumpArg = $short.DumpPath
-    if ($dumpArg -match '\s') { $dumpArg = "`"$dumpArg`"" }
-
-    $ConnParams = Get-1CConnectionParams -DBType $DBType -BasePath $BasePath
-    $ArgLine = "DESIGNER $ConnParams /N `"$User`" /P `"$Password`" /DumpConfigToFiles $dumpArg -Format Hierarchical"
-
-    if ($Extension) {
-        $ArgLine += " -Extension `"$Extension`""
-        Write-Log "Выгрузка расширения: $Extension"
-        Set-Status -Text "Выгрузка расширения: $Extension" -Percent $ProgressFrom
+    $useUpdate = Resolve-UseIncrementalDump -DumpMode $DumpMode -OutputPath $OutputPath
+    if ($useUpdate) {
+        Write-Log "Режим выгрузки: инкрементальная (-update)"
+        if (-not (Test-Path -LiteralPath $OutputPath)) {
+            New-Item -ItemType Directory -Path $OutputPath -Force | Out-Null
+        }
     }
     else {
-        Write-Log "Выгрузка основной конфигурации"
-        Set-Status -Text "Выгрузка основной конфигурации..." -Percent $ProgressFrom
+        Write-Log "Режим выгрузки: полная"
+        Clear-ExportPath -Path $OutputPath
     }
 
-    try {
-        $marker = Join-Path $OutputPath "Configuration.xml"
-        Invoke-1CDesigner -Platform $Platform -ArgumentString $ArgLine -SuccessMarker $marker | Out-Null
+    $title = "Выгрузка основной конфигурации"
+    if ($Extension) { $title = "Выгрузка расширения: $Extension" }
+
+    $attemptedUpdate = $useUpdate
+    $done = $false
+    $lastError = $null
+
+    while (-not $done) {
+        Test-Cancelled
+        $short = Enter-ShortDumpPath -TargetPath $OutputPath
+        $dumpArg = $short.DumpPath
+        if ($dumpArg -match '\s') { $dumpArg = "`"$dumpArg`"" }
+
+        $ConnParams = Get-1CConnectionParams -DBType $DBType -BasePath $BasePath
+        $ArgLine = "DESIGNER $ConnParams /N `"$User`" /P `"$Password`" /DumpConfigToFiles $dumpArg"
+        if ($useUpdate) { $ArgLine += " -update" }
+        $ArgLine += " -Format Hierarchical"
+        if ($Extension) { $ArgLine += " -Extension `"$Extension`"" }
+
+        Write-Log $title
+        Set-Status -Text "$title..." -Percent $ProgressFrom
+        Start-DumpWatch -Path $short.DumpPath -Title $title
+
+        try {
+            $marker = Join-Path $OutputPath "Configuration.xml"
+            Invoke-1CDesigner -Platform $Platform -ArgumentString $ArgLine -SuccessMarker $marker | Out-Null
+            $done = $true
+        }
+        catch [System.OperationCanceledException] {
+            throw
+        }
+        catch {
+            $lastError = $_
+            if ($useUpdate) {
+                Write-Log "Инкрементальная выгрузка не удалась: $lastError"
+                Write-Log "Повторяем как полную выгрузку"
+                $useUpdate = $false
+            }
+            else {
+                throw
+            }
+        }
+        finally {
+            Stop-DumpWatch
+            Exit-ShortDumpPath -Info $short
+        }
+
+        if (-not $done -and -not $useUpdate -and $attemptedUpdate) {
+            Clear-ExportPath -Path $OutputPath
+            $attemptedUpdate = $false
+        }
     }
-    finally {
-        Exit-ShortDumpPath -Info $short
-    }
+
     Write-Log "Выгрузка завершена: $OutputPath"
 }
 
@@ -1901,6 +2298,7 @@ function Get-1CExtensionsList {
 
     $ConnParams = Get-1CConnectionParams -DBType $DBType -BasePath $BasePath
     $ArgLine = "DESIGNER $ConnParams /N `"$User`" /P `"$Password`" /DumpConfigToFiles $dumpArg -AllExtensions -Format Hierarchical"
+    Start-DumpWatch -Path $short.DumpPath -Title "Получение списка расширений"
 
     try {
         Invoke-1CDesigner -Platform $Platform -ArgumentString $ArgLine -IgnoreExitCode | Out-Null
@@ -1910,6 +2308,7 @@ function Get-1CExtensionsList {
         throw
     }
     finally {
+        Stop-DumpWatch
         Exit-ShortDumpPath -Info $short
     }
 
@@ -1942,7 +2341,8 @@ function Invoke-DumpExtensionsPipeline {
         [string]$Password,
         [string]$RepoDir,
         [bool]$SelectManually,
-        [string]$ExcludePrefix
+        [string]$ExcludePrefix,
+        [string]$DumpMode = "Auto"
     )
 
     $AllExtensions = Get-1CExtensionsList -Platform $Platform -DBType $DBType `
@@ -1983,16 +2383,14 @@ function Invoke-DumpExtensionsPipeline {
         $ExtPath = Join-Path $RepoDir "Extensions\$ExtName"
         Invoke-1CExport -Platform $Platform -DBType $DBType -BasePath $BasePath `
             -User $User -Password $Password -OutputPath $ExtPath `
-            -Extension $ExtName `
+            -Extension $ExtName -DumpMode $DumpMode `
             -ProgressFrom $PercentFrom -ProgressTo $PercentTo
     }
 }
 
-# === ТОЧКА ВХОДА ПРИЛОЖЕНИЯ ===
-try {
-    Initialize-WorkDir
+function Invoke-SyncPipeline {
+    param($Config)
 
-    $Config = Get-Config
     $Action                    = [string]$Config.Action
     if (-not $Action) { $Action = "all" }
     $PlatformPath              = $Config.PlatformPath
@@ -2007,11 +2405,13 @@ try {
     $ExportExtensions          = [bool]$Config.ExportExtensions
     $SelectExtensionsManually  = [bool]$Config.SelectExtensionsManually
     $ExtensionExcludePrefix    = [string]$Config.ExtensionExcludePrefix
+    $DumpMode                  = [string]$Config.DumpMode
+    if (-not $DumpMode) { $DumpMode = "Auto" }
 
     $doMain = ($Action -eq "config") -or ($Action -eq "all" -and $ExportMainConfig)
     $doExt  = ($Action -eq "extensions") -or ($Action -eq "all" -and $ExportExtensions)
     $doGitPublish = $Action -in @("all", "git")
-    $doGitPrepare = $doGitPublish -or (($doMain -or $doExt) -and $GitRepoUrl)
+    $doGitPrepare = $doGitPublish -or (($doMain -or $doExt) -and $GitRepoUrl) -or ($Action -eq "reclone")
 
     $configTiming = $null
     $extTiming = $null
@@ -2025,7 +2425,21 @@ try {
     Write-Log "База: $InfobasePath"
     Write-Log "Репозиторий: $GitRepoUrl"
     Write-Log "Ветка: $GitBranch"
+    Write-Log "Режим выгрузки: $DumpMode"
     Write-Log "Выгрузка конфигурации: $doMain; расширения: $doExt; Git: $doGitPublish"
+
+    if ($Action -eq "reclone") {
+        $EmbeddedGit = Join-Path $AppDir "PortableGit-64-bit.7z.exe"
+        Initialize-PortableGit -EmbeddedArchive $EmbeddedGit
+        Initialize-GitIdentity -GitExe $GitExe -GitHome $GitHome
+        Reset-GitLocalClone -GitExe $GitExe -RepoDir $GitRepo -RemoteUrl $GitRepoUrl
+        Initialize-GitRepository -GitExe $GitExe -RepoDir $GitRepo `
+            -RemoteUrl $GitRepoUrl -Branch $GitBranch -GitHome $GitHome
+        Set-Status -Text "Чистый клон готов" -Percent 100
+        Write-Log "Операция успешно завершена"
+        Set-TimingSummaryText -Text ("Чистый клон готов.`r`nРепозиторий: {0}`r`nОкончание: {1}" -f $GitRepoUrl, (Format-DateTimeStamp -Value (Get-Date)))
+        return
+    }
 
     if ($doGitPrepare) {
         $gitPrepStart = Get-Date
@@ -2050,7 +2464,7 @@ try {
         $opStart = Get-Date
         Invoke-1CExport -Platform $PlatformPath -DBType $DBType -BasePath $InfobasePath `
             -User $1CUser -Password $1CPassword -OutputPath $ConfigExportPath `
-            -ProgressFrom 45 -ProgressTo 65
+            -DumpMode $DumpMode -ProgressFrom 45 -ProgressTo 65
         $configTiming = New-OpTiming -StartedAt $opStart -EndedAt (Get-Date)
         Write-Log ("Выгрузка конфигурации: {0}" -f (Format-ElapsedTime -Elapsed $configTiming.Elapsed))
     }
@@ -2063,7 +2477,7 @@ try {
         Invoke-DumpExtensionsPipeline -Platform $PlatformPath -DBType $DBType `
             -BasePath $InfobasePath -User $1CUser -Password $1CPassword `
             -RepoDir $GitRepo -SelectManually $SelectExtensionsManually `
-            -ExcludePrefix $ExtensionExcludePrefix
+            -ExcludePrefix $ExtensionExcludePrefix -DumpMode $DumpMode
         $extTiming = New-OpTiming -StartedAt $opStart -EndedAt (Get-Date)
         Write-Log ("Выгрузка расширений: {0}" -f (Format-ElapsedTime -Elapsed $extTiming.Elapsed))
     }
@@ -2076,7 +2490,8 @@ try {
         Test-Cancelled
         $opStart = Get-Date
         $publishResult = Invoke-GitPublish -GitExe $GitExe -RepoDir $GitRepo `
-            -Branch $GitBranch -GitHome $GitHome -AutoConfirm:$AutoConfirmGitPush
+            -Branch $GitBranch -GitHome $GitHome -InfobasePath $InfobasePath `
+            -AutoConfirm:$AutoConfirmGitPush
         $opEnd = Get-Date
         if ($gitTiming) {
             $gitTiming = New-OpTiming -StartedAt $gitTiming.StartedAt -EndedAt $opEnd `
@@ -2090,8 +2505,6 @@ try {
 
     Set-Status -Text "Готово!" -Percent 100
     Write-Log "Операция успешно завершена"
-    Start-Sleep -Seconds 1
-    Close-ProgressForm
 
     $doneMessage = "Операция завершена успешно."
     switch ($Action) {
@@ -2122,27 +2535,21 @@ try {
     foreach ($timingLine in ($timingText -split "`r`n")) {
         if ($timingLine) { Write-Log $timingLine }
     }
-    $doneMessage = $doneMessage + "`r`n`r`n" + $timingText
-
-    Show-CompletionForm -Title "1C Git Sync" -Message $doneMessage -ShowRepoButton
+    Set-TimingSummaryText -Text ($doneMessage + "`r`n`r`n" + $timingText)
 }
-catch [System.OperationCanceledException] {
-    Write-Log "Операция отменена пользователем"
-    Set-Status -Text "Операция отменена" -Percent 100
-    Close-ProgressForm
-    [System.Windows.Forms.MessageBox]::Show(
-        "Операция отменена.",
-        "1C Git Sync",
-        [System.Windows.Forms.MessageBoxButtons]::OK,
-        [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
-    exit 0
+
+# === ТОЧКА ВХОДА ПРИЛОЖЕНИЯ ===
+try {
+    Initialize-WorkDir
+    $existing = Load-SavedConfig
+    Show-SettingsForm -Existing $existing
 }
 catch {
     Write-Log "КРИТИЧЕСКАЯ ОШИБКА: $_" "ERROR"
-    Set-Status -Text "Ошибка: $_" -Percent 100
-    Start-Sleep -Seconds 1
-    Close-ProgressForm
-
-    Show-CompletionForm -Title "1C Git Sync" -Message "Ошибка:`r`n`r`n$_`r`n`r`nЛог: $WorkDir\app.log"
+    [System.Windows.Forms.MessageBox]::Show(
+        "Ошибка запуска:`r`n`r`n$_",
+        "1C Git Sync",
+        [System.Windows.Forms.MessageBoxButtons]::OK,
+        [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
     exit 1
 }
