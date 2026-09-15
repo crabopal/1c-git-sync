@@ -8,13 +8,13 @@ Windows-приложение на PowerShell: выгружает конфигу�
 
 https://github.com/crabopal/1c-git-sync/releases/latest/download/1c-git-sync.zip
 
-Git на клиентском компьютере не нужен: распакуйте ZIP, положите рядом `PortableGit-64-bit.7z.exe` и запустите `run.bat`.
+Git на клиентском компьютере не нужен: в архиве уже есть `PortableGit-64-bit.7z.exe`. Распакуйте ZIP и запустите `run.bat`. При первом запуске портативный Git распакуется в `workdir`.
 
 Раздел **Packages** на GitHub для этого не используется: там публикуют npm, NuGet и Docker-образы. Архив приложения — это **Releases**.
 
 ## Запуск
 
-1. Положите рядом с скриптом `PortableGit-64-bit.7z.exe` (портативный Git for Windows).
+1. Распакуйте архив из Releases (рядом со скриптом должен лежать `PortableGit-64-bit.7z.exe`).
 2. Запустите `run.bat`.
 
 Нужна установленная платформа 1С (`1cv8.exe`).

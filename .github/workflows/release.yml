@@ -21,8 +21,12 @@ jobs:
 
       - name: Build zip
         run: |
+          if [ ! -f PortableGit-64-bit.7z.exe ]; then
+            echo "PortableGit-64-bit.7z.exe is missing from the repository" >&2
+            exit 1
+          fi
           mkdir -p dist/1c-git-sync
-          cp My1CApp.ps1 run.bat README.md dist/1c-git-sync/
+          cp My1CApp.ps1 run.bat README.md PortableGit-64-bit.7z.exe dist/1c-git-sync/
           cd dist
           zip -r ../1c-git-sync.zip 1c-git-sync
 
