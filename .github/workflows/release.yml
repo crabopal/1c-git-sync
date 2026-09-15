@@ -27,6 +27,8 @@ jobs:
           fi
           mkdir -p dist/1c-git-sync
           cp My1CApp.ps1 run.bat README.md PortableGit-64-bit.7z.exe dist/1c-git-sync/
+          TAG="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}"
+          printf '%s\n' "${TAG#v}" > dist/1c-git-sync/VERSION
           cd dist
           zip -r ../1c-git-sync.zip 1c-git-sync
 

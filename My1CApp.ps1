@@ -39,6 +39,8 @@ $GitRepo          = Join-Path $WorkDir "repo"
 $ConfigExportPath = Join-Path $GitRepo "Config"
 $ConfigPath       = Join-Path $WorkDir "config.json"
 $EmbeddedGit      = Join-Path $AppDir "PortableGit-64-bit.7z.exe"
+$AppVersion       = "1.3.0"
+$AppGitHubRepo    = "crabopal/1c-git-sync"
 
 # === ГЛОБАЛЬНЫЙ КОНТЕКСТ ПРОГРЕССА ===
 $script:ProgressForm          = $null
@@ -60,6 +62,8 @@ $script:Ui                    = @{}
 $script:LogExpanded           = $false
 $script:SetLogExpanded        = $null
 $script:LastTimingSummary     = ""
+$script:IsUpdating            = $false
+$script:LatestRelease         = $null
 
 # === ЛОГИРОВАНИЕ ===
 function Get-AppLogPath {
@@ -753,6 +757,222 @@ function Add-FormLinkLabel {
     return $lnk
 }
 
+function Get-AppVersion {
+    $vf = Join-Path $AppDir "VERSION"
+    if (Test-Path -LiteralPath $vf) {
+        $fromFile = (Get-Content -LiteralPath $vf -Raw -ErrorAction SilentlyContinue)
+        if ($fromFile) {
+            $v = ($fromFile.Trim() -replace '^[vV]', '')
+            if ($v) { return $v }
+        }
+    }
+    return $AppVersion
+}
+
+function ConvertTo-AppVersion {
+    param([string]$Text)
+    $clean = ($Text -replace '^[vV]', '').Trim()
+    if ($clean -notmatch '^\d+(\.\d+){1,3}$') { return $null }
+    try { return [version]$clean } catch { return $null }
+}
+
+function Initialize-Tls12 {
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    }
+    catch { }
+}
+
+function Get-LatestAppRelease {
+    Initialize-Tls12
+    $uri = "https://api.github.com/repos/$AppGitHubRepo/releases/latest"
+    $rel = Invoke-RestMethod -Uri $uri -TimeoutSec 20 -Headers @{
+        "User-Agent" = "1c-git-sync"
+        "Accept"     = "application/vnd.github+json"
+    }
+    $asset = @($rel.assets) | Where-Object { $_.name -eq "1c-git-sync.zip" } | Select-Object -First 1
+    if (-not $asset -or -not $asset.browser_download_url) {
+        throw "В последнем релизе нет файла 1c-git-sync.zip"
+    }
+    $tag = [string]$rel.tag_name
+    $ver = ConvertTo-AppVersion -Text $tag
+    if (-not $ver) { $ver = ConvertTo-AppVersion -Text ([string]$rel.name) }
+    if (-not $ver) { throw "Не удалось разобрать номер версии релиза: $tag" }
+    return [PSCustomObject]@{
+        Tag     = $tag
+        Version = $ver
+        Url     = [string]$asset.browser_download_url
+        Size    = [int64]$asset.size
+    }
+}
+
+function Save-HttpFile {
+    param([string]$Url, [string]$Dest)
+    Initialize-Tls12
+    $req = [System.Net.HttpWebRequest]::Create($Url)
+    $req.Method = "GET"
+    $req.UserAgent = "1c-git-sync"
+    $req.AllowAutoRedirect = $true
+    $req.Timeout = 60000
+    $req.ReadWriteTimeout = 300000
+    $resp = $req.GetResponse()
+    $total = $resp.ContentLength
+    $stream = $resp.GetResponseStream()
+    $fs = [System.IO.File]::Create($Dest)
+    $buf = New-Object byte[] 65536
+    $readTotal = [int64]0
+    try {
+        while (($n = $stream.Read($buf, 0, $buf.Length)) -gt 0) {
+            Test-Cancelled
+            $fs.Write($buf, 0, $n)
+            $readTotal += $n
+            if ($total -gt 0) {
+                $pct = [int][Math]::Min(100, [Math]::Round(100.0 * $readTotal / $total))
+                $mb = [Math]::Round($readTotal / 1MB, 1)
+                $all = [Math]::Round($total / 1MB, 1)
+                Set-Status -Text ("Скачивание обновления: {0} из {1} МБ ({2}%)" -f $mb, $all, $pct) -Percent $pct
+            }
+            else {
+                Set-Status -Text ("Скачивание обновления: {0} МБ" -f [Math]::Round($readTotal / 1MB, 1))
+            }
+            [System.Windows.Forms.Application]::DoEvents()
+        }
+    }
+    finally {
+        $fs.Dispose()
+        $stream.Dispose()
+        $resp.Close()
+    }
+}
+
+function Find-UpdatePayloadDir {
+    param([string]$Root)
+    $direct = Join-Path $Root "My1CApp.ps1"
+    if (Test-Path -LiteralPath $direct) { return $Root }
+    $found = Get-ChildItem -LiteralPath $Root -Recurse -Filter "My1CApp.ps1" -File -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($found) { return $found.DirectoryName }
+    throw "В архиве обновления нет My1CApp.ps1"
+}
+
+function Start-AppSelfUpdate {
+    param($Form)
+
+    if ($script:IsBusy) { return }
+
+    $currentText = Get-AppVersion
+    $current = ConvertTo-AppVersion -Text $currentText
+    if (-not $current) { $current = [version]"0.0.0" }
+
+    try {
+        Set-Status -Text "Проверка обновлений..."
+        [System.Windows.Forms.Application]::DoEvents()
+        $rel = Get-LatestAppRelease
+        $script:LatestRelease = $rel
+    }
+    catch {
+        Write-Log "Проверка обновлений не удалась: $_" "ERROR"
+        [System.Windows.Forms.MessageBox]::Show(
+            "Не удалось проверить обновления:`r`n`r`n$_",
+            "1C Git Sync",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+        Set-Status -Text "Готово к запуску"
+        return
+    }
+
+    if ($rel.Version -le $current) {
+        [System.Windows.Forms.MessageBox]::Show(
+            "Установлена актуальная версия $currentText.",
+            "1C Git Sync",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+        Set-Status -Text "Готово к запуску"
+        return
+    }
+
+    $answer = [System.Windows.Forms.MessageBox]::Show(
+        "Доступна версия $($rel.Version) (сейчас $currentText).`r`n`r`nСкачать релиз и перезапустить программу?`r`nКаталог workdir не изменяется.",
+        "Обновление 1C Git Sync",
+        [System.Windows.Forms.MessageBoxButtons]::YesNo,
+        [System.Windows.Forms.MessageBoxIcon]::Question)
+    if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) {
+        Set-Status -Text ("Доступна версия {0}" -f $rel.Version)
+        return
+    }
+
+    $stageRoot = Join-Path $WorkDir "update-staging"
+    $zipPath = Join-Path $WorkDir "1c-git-sync-update.zip"
+    $script:CancelRequested = $false
+    Set-MainFormBusy -Busy $true
+    try {
+        if (-not (Test-Path $WorkDir)) {
+            New-Item -ItemType Directory -Path $WorkDir -Force | Out-Null
+        }
+        if (Test-Path -LiteralPath $stageRoot) {
+            Remove-Item -LiteralPath $stageRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        if (Test-Path -LiteralPath $zipPath) {
+            Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue
+        }
+
+        Write-Log "Скачивание $($rel.Tag) из $($rel.Url)"
+        Save-HttpFile -Url $rel.Url -Dest $zipPath
+        Test-Cancelled
+
+        Set-Status -Text "Распаковка обновления..." -Percent 90
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        [System.IO.Compression.ZipFile]::ExtractToDirectory($zipPath, $stageRoot)
+        $payload = Find-UpdatePayloadDir -Root $stageRoot
+        Write-Log "Пакет обновления: $payload"
+
+        $updPs1 = Join-Path $WorkDir "apply-update.ps1"
+        $updText = @"
+param([string]`$Src, [string]`$Dst, [int]`$WaitPid)
+while (Get-Process -Id `$WaitPid -ErrorAction SilentlyContinue) {
+    Start-Sleep -Seconds 1
+}
+Copy-Item -Path (Join-Path `$Src '*') -Destination `$Dst -Recurse -Force
+`$run = Join-Path `$Dst 'run.bat'
+if (Test-Path -LiteralPath `$run) {
+    Start-Process -FilePath `$run -WorkingDirectory `$Dst
+}
+`$stage = Split-Path -Parent `$Src
+if (`$stage -and ((Split-Path `$stage -Leaf) -eq 'update-staging')) {
+    Remove-Item -LiteralPath `$stage -Recurse -Force -ErrorAction SilentlyContinue
+}
+`$zip = Join-Path `$Dst 'workdir\1c-git-sync-update.zip'
+if (Test-Path -LiteralPath `$zip) {
+    Remove-Item -LiteralPath `$zip -Force -ErrorAction SilentlyContinue
+}
+Remove-Item -LiteralPath `$PSCommandPath -Force -ErrorAction SilentlyContinue
+"@
+        $utf8 = New-Object System.Text.UTF8Encoding $true
+        [System.IO.File]::WriteAllText($updPs1, $updText, $utf8)
+
+        $arg = "-NoProfile -ExecutionPolicy Bypass -File `"$updPs1`" `"$payload`" `"$AppDir`" $PID"
+        Write-Log "Перезапуск после обновления до $($rel.Version)"
+        $script:IsUpdating = $true
+        Start-Process -FilePath "powershell.exe" -ArgumentList $arg -WindowStyle Hidden | Out-Null
+        if ($Form -and -not $Form.IsDisposed) { $Form.Close() }
+    }
+    catch [System.OperationCanceledException] {
+        Write-Log "Обновление отменено"
+        Set-Status -Text "Обновление отменено"
+        Set-MainFormBusy -Busy $false
+    }
+    catch {
+        Write-Log "Ошибка обновления: $_" "ERROR"
+        Set-MainFormBusy -Busy $false
+        Set-Status -Text "Ошибка обновления"
+        [System.Windows.Forms.MessageBox]::Show(
+            "Не удалось обновить программу:`r`n`r`n$_",
+            "1C Git Sync",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+    }
+}
+
 # === ГЛАВНОЕ ОКНО ===
 function Show-SettingsForm {
     param([PSCustomObject]$Existing)
@@ -760,7 +980,7 @@ function Show-SettingsForm {
     $Existing = Merge-Config -Existing $Existing
 
     $form = New-Object System.Windows.Forms.Form
-    $form.Text = "1C Git Sync"
+    $form.Text = "1C Git Sync " + (Get-AppVersion)
     $form.Width = 740
     $form.Height = 640
     $form.StartPosition = "CenterScreen"
@@ -796,7 +1016,33 @@ function Show-SettingsForm {
     $pnlBottom.Dock = "Bottom"
     $pnlBottom.Height = 92
     $form.Controls.Add($pnlBottom)
+
+    $pnlActions = New-Object System.Windows.Forms.Panel
+    $pnlActions.Dock = "Bottom"
+    $pnlActions.Height = 48
+    $form.Controls.Add($pnlActions)
     $form.Controls.Add($tabs)
+
+    $btnDump = New-Object System.Windows.Forms.Button
+    $btnDump.Text = "Выгрузить в Git"
+    $btnDump.Left = 5; $btnDump.Top = 7
+    $btnDump.Width = 180; $btnDump.Height = 34
+    $pnlActions.Controls.Add($btnDump)
+    $tip.SetToolTip($btnDump, "Выгружает отмеченный состав на вкладке «Выгрузка» и отправляет коммит в Git")
+
+    $btnGit = New-Object System.Windows.Forms.Button
+    $btnGit.Text = "Только Git"
+    $btnGit.Left = 195; $btnGit.Top = 7
+    $btnGit.Width = 120; $btnGit.Height = 34
+    $pnlActions.Controls.Add($btnGit)
+    $tip.SetToolTip($btnGit, "Только commit и push уже выгруженных файлов")
+
+    $btnLoad = New-Object System.Windows.Forms.Button
+    $btnLoad.Text = "Загрузить в 1С"
+    $btnLoad.Left = 325; $btnLoad.Top = 7
+    $btnLoad.Width = 180; $btnLoad.Height = 34
+    $pnlActions.Controls.Add($btnLoad)
+    $tip.SetToolTip($btnLoad, "Заменяет конфигурацию в базе файлами из Git по флажкам вкладки «Загрузка»")
 
     $labelLeft = 15; $fieldLeft = 230; $fieldWidth = 300; $browseLeft = 540; $browseWidth = 90
     $rowHeight = 32; $topStart = 16
@@ -1205,27 +1451,6 @@ function Show-SettingsForm {
         else { $lnkDumpExtra.Text = "Дополнительно" }
     })
 
-    $pnlDumpActions = New-Object System.Windows.Forms.Panel
-    $pnlDumpActions.Dock = "Bottom"
-    $pnlDumpActions.Height = 50
-    $tabDump.Controls.Add($pnlDumpActions)
-
-    $btnDump = New-Object System.Windows.Forms.Button
-    $btnDump.Text = "Выгрузить в Git"
-    $btnDump.Width = 180; $btnDump.Height = 34
-    $btnDump.Left = $labelLeft
-    $btnDump.Top = 8
-    $pnlDumpActions.Controls.Add($btnDump)
-    $tip.SetToolTip($btnDump, "Выгружает отмеченный состав и отправляет коммит в Git")
-
-    $btnGit = New-Object System.Windows.Forms.Button
-    $btnGit.Text = "Только Git"
-    $btnGit.Width = 120; $btnGit.Height = 34
-    $btnGit.Left = $labelLeft + 190
-    $btnGit.Top = 8
-    $pnlDumpActions.Controls.Add($btnGit)
-    $tip.SetToolTip($btnGit, "Только commit и push уже выгруженных файлов")
-
     # --- Вкладка «Загрузка» ---
     $lblLoadSummary = New-Object System.Windows.Forms.Label
     $lblLoadSummary.Left = $labelLeft; $lblLoadSummary.Top = $topStart
@@ -1305,19 +1530,6 @@ function Show-SettingsForm {
         else { $lnkLoadExtra.Text = "Дополнительно" }
     })
 
-    $pnlLoadActions = New-Object System.Windows.Forms.Panel
-    $pnlLoadActions.Dock = "Bottom"
-    $pnlLoadActions.Height = 50
-    $tabLoad.Controls.Add($pnlLoadActions)
-
-    $btnLoad = New-Object System.Windows.Forms.Button
-    $btnLoad.Text = "Загрузить в 1С"
-    $btnLoad.Width = 180; $btnLoad.Height = 34
-    $btnLoad.Left = $labelLeft
-    $btnLoad.Top = 8
-    $pnlLoadActions.Controls.Add($btnLoad)
-    $tip.SetToolTip($btnLoad, "Заменяет конфигурацию в базе файлами из выбранной ветки Git")
-
     & $UpdateSummaries
     $tabs.Add_SelectedIndexChanged({ & $UpdateSummaries })
 
@@ -1359,6 +1571,22 @@ function Show-SettingsForm {
     $btnToggleLog.Width = 150; $btnToggleLog.Height = 24
     $btnToggleLog.Anchor = "Top,Left"
     $pnlBottom.Controls.Add($btnToggleLog)
+
+    $btnUpdate = New-Object System.Windows.Forms.Button
+    $btnUpdate.Text = "Обновить"
+    $btnUpdate.Left = 165; $btnUpdate.Top = 52
+    $btnUpdate.Width = 120; $btnUpdate.Height = 24
+    $btnUpdate.Anchor = "Top,Left"
+    $pnlBottom.Controls.Add($btnUpdate)
+    $tip.SetToolTip($btnUpdate, "Проверить GitHub Releases и установить новую версию")
+
+    $lblVersion = New-Object System.Windows.Forms.Label
+    $lblVersion.Text = "Версия " + (Get-AppVersion)
+    $lblVersion.Left = 295; $lblVersion.Top = 55
+    $lblVersion.Width = 390; $lblVersion.Height = 20
+    $lblVersion.Anchor = "Top,Left,Right"
+    $lblVersion.ForeColor = [System.Drawing.Color]::Gray
+    $pnlBottom.Controls.Add($lblVersion)
 
     $txtLog = New-Object System.Windows.Forms.TextBox
     $txtLog.Left = 5; $txtLog.Top = 80
@@ -1422,14 +1650,16 @@ function Show-SettingsForm {
     $script:ProgressCancelButton = $btnCancelOp
     $script:TimingBox            = $null
     $script:MainTabs             = $tabs
-    $script:ActionButtons        = @($btnDump, $btnGit, $btnLoad, $btnCleanClone)
+    $script:ActionButtons        = @($btnDump, $btnGit, $btnLoad, $btnCleanClone, $btnUpdate)
 
     $btnDump.Add_Click({ Start-UiAction -Action "all" })
     $btnGit.Add_Click({ Start-UiAction -Action "git" })
     $btnLoad.Add_Click({ Start-UiAction -Action "load" })
     $btnCleanClone.Add_Click({ Start-UiAction -Action "reclone" })
+    $btnUpdate.Add_Click({ Start-AppSelfUpdate -Form $form })
 
     $form.Add_FormClosing({
+        if ($script:IsUpdating) { return }
         if ($script:IsBusy) {
             $_.Cancel = $true
             [System.Windows.Forms.MessageBox]::Show(
@@ -1453,9 +1683,23 @@ function Show-SettingsForm {
             }
             catch { }
         }
-        Write-Log "Приложение запущено"
+        Write-Log "Приложение запущено, версия $(Get-AppVersion)"
         Set-Status -Text "Готово к запуску" -Percent 0
         if ($script:ProgressBar) { $script:ProgressBar.Visible = $false }
+        try {
+            $rel = Get-LatestAppRelease
+            $script:LatestRelease = $rel
+            $cur = ConvertTo-AppVersion -Text (Get-AppVersion)
+            if ($cur -and $rel.Version -gt $cur) {
+                $lblVersion.Text = "Версия $(Get-AppVersion)  ·  доступна $($rel.Version)"
+                $lblVersion.ForeColor = [System.Drawing.Color]::DarkOrange
+                $btnUpdate.Text = "Обновить"
+                Set-Status -Text ("Доступна версия {0} — нажмите «Обновить»" -f $rel.Version)
+            }
+        }
+        catch {
+            Write-Log "Фоновая проверка обновлений: $_"
+        }
     })
 
     [void]$form.ShowDialog()
