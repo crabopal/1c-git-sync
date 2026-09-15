@@ -57,6 +57,9 @@ $script:DumpWatchTitle        = ""
 $script:DumpWatchStarted      = $null
 $script:DumpWatchLastPoll     = $null
 $script:Ui                    = @{}
+$script:LogExpanded           = $false
+$script:SetLogExpanded        = $null
+$script:LastTimingSummary     = ""
 
 # === ЛОГИРОВАНИЕ ===
 function Get-AppLogPath {
@@ -671,7 +674,15 @@ function Set-MainFormBusy {
     foreach ($btn in @($script:ActionButtons)) {
         if ($btn -and -not $btn.IsDisposed) { $btn.Enabled = -not $Busy }
     }
+    if ($script:ProgressBar -and -not $script:ProgressBar.IsDisposed) {
+        $script:ProgressBar.Visible = $Busy
+        if ($Busy) { $script:ProgressBar.Value = 0 }
+    }
+    if ($Busy -and $script:SetLogExpanded) {
+        & $script:SetLogExpanded $true
+    }
     if ($script:ProgressCancelButton -and -not $script:ProgressCancelButton.IsDisposed) {
+        $script:ProgressCancelButton.Visible = $true
         $script:ProgressCancelButton.Enabled = $Busy -and -not $script:CancelRequested
         if (-not $Busy) { $script:ProgressCancelButton.Text = "Отмена" }
     }
@@ -732,6 +743,16 @@ function Add-FormTextBox {
     return $tb
 }
 
+function Add-FormLinkLabel {
+    param($Parent, [string]$Text, [int]$Left, [int]$Top, [int]$Width = 220)
+    $lnk = New-Object System.Windows.Forms.LinkLabel
+    $lnk.Text = $Text
+    $lnk.Left = $Left; $lnk.Top = $Top; $lnk.Width = $Width
+    $lnk.Height = 20
+    $Parent.Controls.Add($lnk)
+    return $lnk
+}
+
 # === ГЛАВНОЕ ОКНО ===
 function Show-SettingsForm {
     param([PSCustomObject]$Existing)
@@ -741,50 +762,86 @@ function Show-SettingsForm {
     $form = New-Object System.Windows.Forms.Form
     $form.Text = "1C Git Sync"
     $form.Width = 740
-    $form.Height = 880
+    $form.Height = 640
     $form.StartPosition = "CenterScreen"
-    $form.MinimumSize = New-Object System.Drawing.Size(740, 780)
+    $form.MinimumSize = New-Object System.Drawing.Size(720, 560)
     $form.MaximizeBox = $true
     $form.MinimizeBox = $true
     $form.Font = New-Object System.Drawing.Font("Segoe UI", 9)
 
-    $tabs = New-Object System.Windows.Forms.TabControl
-    $tabs.Left = 10; $tabs.Top = 10
-    $tabs.Width = 705; $tabs.Height = 380
-    $tabs.Anchor = "Top,Left,Right"
-    $form.Controls.Add($tabs)
+    $tip = New-Object System.Windows.Forms.ToolTip
+    $tip.AutoPopDelay = 12000
+    $tip.InitialDelay = 400
 
-    $tab1C = New-Object System.Windows.Forms.TabPage
-    $tab1C.Text = "База 1С"
-    $tabGit = New-Object System.Windows.Forms.TabPage
-    $tabGit.Text = "Git"
+    $form.Padding = New-Object System.Windows.Forms.Padding(10, 10, 10, 8)
+
+    $tabs = New-Object System.Windows.Forms.TabControl
+    $tabs.Dock = "Fill"
+
+
     $tabDump = New-Object System.Windows.Forms.TabPage
     $tabDump.Text = "Выгрузка"
-    $tabs.TabPages.Add($tab1C)
-    $tabs.TabPages.Add($tabGit)
-    $tabs.TabPages.Add($tabDump)
-
+    $tabDump.AutoScroll = $true
     $tabLoad = New-Object System.Windows.Forms.TabPage
     $tabLoad.Text = "Загрузка"
+    $tabLoad.AutoScroll = $true
+    $tabSettings = New-Object System.Windows.Forms.TabPage
+    $tabSettings.Text = "Настройки"
+    $tabSettings.AutoScroll = $true
+    $tabs.TabPages.Add($tabDump)
     $tabs.TabPages.Add($tabLoad)
+    $tabs.TabPages.Add($tabSettings)
+
+    $pnlBottom = New-Object System.Windows.Forms.Panel
+    $pnlBottom.Dock = "Bottom"
+    $pnlBottom.Height = 92
+    $form.Controls.Add($pnlBottom)
+    $form.Controls.Add($tabs)
 
     $labelLeft = 15; $fieldLeft = 230; $fieldWidth = 300; $browseLeft = 540; $browseWidth = 90
-    $rowHeight = 32; $topStart = 20
+    $rowHeight = 32; $topStart = 16
 
-    # --- Вкладка «База 1С» ---
-    [void](Add-FormLabel -Parent $tab1C -Text "Путь к 1cv8.exe:" -Left $labelLeft -Top ($topStart + 3))
+    # --- Общие поля подключения (вкладка «Настройки») ---
+    [void](Add-FormLabel -Parent $tabSettings -Text "База из списка:" -Left $labelLeft -Top ($topStart + 3))
+    $cbIBases = New-Object System.Windows.Forms.ComboBox
+    $cbIBases.Left = $fieldLeft
+    $cbIBases.Top = $topStart
+    $cbIBases.Width = $fieldWidth
+    $cbIBases.DropDownStyle = "DropDownList"
+    $cbIBases.DropDownWidth = 620
+    $tabSettings.Controls.Add($cbIBases)
+    $tip.SetToolTip($cbIBases, "Список информационных баз из ibases.v8i")
 
+    $btnBrowseV8i = New-Object System.Windows.Forms.Button
+    $btnBrowseV8i.Text = "Список..."
+    $btnBrowseV8i.Left = $browseLeft
+    $btnBrowseV8i.Top = $topStart
+    $btnBrowseV8i.Width = $browseWidth
+    $btnBrowseV8i.Height = 22
+    $tabSettings.Controls.Add($btnBrowseV8i)
+    $tip.SetToolTip($btnBrowseV8i, "Открыть другой файл ibases.v8i")
+
+    $lnkConnExtra = Add-FormLinkLabel -Parent $tabSettings -Text "Параметры подключения" -Left $fieldLeft -Top ($topStart + $rowHeight) -Width 240
+
+    $pnlConn = New-Object System.Windows.Forms.Panel
+    $pnlConn.Left = 0
+    $pnlConn.Top = $topStart + ($rowHeight * 2) - 4
+    $pnlConn.Width = 680
+    $pnlConn.Height = 230
+    $pnlConn.Visible = $false
+    $tabSettings.Controls.Add($pnlConn)
+
+    [void](Add-FormLabel -Parent $pnlConn -Text "Путь к 1cv8.exe:" -Left $labelLeft -Top 3)
     $platformValue = $Existing.PlatformPath
     if (-not $platformValue) {
         $AutoPath = Find-Latest1CPlatform
         if ($AutoPath) { $platformValue = $AutoPath }
         else { $platformValue = "C:\Program Files\1cv8\8.3.XX.XXXX\bin\1cv8.exe" }
     }
-    $tbPlatform = Add-FormTextBox -Parent $tab1C -Left $fieldLeft -Top $topStart -Width $fieldWidth -Value $platformValue
-
+    $tbPlatform = Add-FormTextBox -Parent $pnlConn -Left $fieldLeft -Top 0 -Width $fieldWidth -Value $platformValue
     $btnBrowsePlatform = New-Object System.Windows.Forms.Button
     $btnBrowsePlatform.Text = "Обзор..."
-    $btnBrowsePlatform.Left = $browseLeft; $btnBrowsePlatform.Top = $topStart
+    $btnBrowsePlatform.Left = $browseLeft; $btnBrowsePlatform.Top = 0
     $btnBrowsePlatform.Width = $browseWidth; $btnBrowsePlatform.Height = 22
     $btnBrowsePlatform.Add_Click({
         $dlg = New-Object System.Windows.Forms.OpenFileDialog
@@ -798,52 +855,34 @@ function Show-SettingsForm {
             $tbPlatform.Text = $dlg.FileName
         }
     })
-    $tab1C.Controls.Add($btnBrowsePlatform)
+    $pnlConn.Controls.Add($btnBrowsePlatform)
 
-    [void](Add-FormLabel -Parent $tab1C -Text "База из списка:" -Left $labelLeft -Top ($topStart + $rowHeight + 3))
-    $cbIBases = New-Object System.Windows.Forms.ComboBox
-    $cbIBases.Left = $fieldLeft
-    $cbIBases.Top = $topStart + $rowHeight
-    $cbIBases.Width = $fieldWidth
-    $cbIBases.DropDownStyle = "DropDownList"
-    $cbIBases.DropDownWidth = 620
-    $tab1C.Controls.Add($cbIBases)
-
-    $btnBrowseV8i = New-Object System.Windows.Forms.Button
-    $btnBrowseV8i.Text = "Список..."
-    $btnBrowseV8i.Left = $browseLeft
-    $btnBrowseV8i.Top = $topStart + $rowHeight
-    $btnBrowseV8i.Width = $browseWidth
-    $btnBrowseV8i.Height = 22
-    $tab1C.Controls.Add($btnBrowseV8i)
-
-    [void](Add-FormLabel -Parent $tab1C -Text "Тип базы:" -Left $labelLeft -Top ($topStart + ($rowHeight * 2) + 3))
-
+    [void](Add-FormLabel -Parent $pnlConn -Text "Тип базы:" -Left $labelLeft -Top ($rowHeight + 3))
     $rbFile = New-Object System.Windows.Forms.RadioButton
     $rbFile.Text = "Файловая"
-    $rbFile.Left = $fieldLeft; $rbFile.Top = $topStart + ($rowHeight * 2)
+    $rbFile.Left = $fieldLeft; $rbFile.Top = $rowHeight
     $rbFile.Width = 100
-    $tab1C.Controls.Add($rbFile)
+    $pnlConn.Controls.Add($rbFile)
 
     $rbServer = New-Object System.Windows.Forms.RadioButton
     $rbServer.Text = "Клиент-серверная"
-    $rbServer.Left = $fieldLeft + 110; $rbServer.Top = $topStart + ($rowHeight * 2)
+    $rbServer.Left = $fieldLeft + 110; $rbServer.Top = $rowHeight
     $rbServer.Width = 160
-    $tab1C.Controls.Add($rbServer)
+    $pnlConn.Controls.Add($rbServer)
 
     $IsServer = $false
     if ($Existing.DBType -eq "Server") { $IsServer = $true }
     elseif ($Existing.InfobasePath -and $Existing.InfobasePath -notmatch '^[a-zA-Z]:\\') { $IsServer = $true }
     if ($IsServer) { $rbServer.Checked = $true } else { $rbFile.Checked = $true }
 
-    $lbl2 = Add-FormLabel -Parent $tab1C -Text "Каталог информационной базы:" -Left $labelLeft -Top ($topStart + ($rowHeight * 3) + 3)
+    $lbl2 = Add-FormLabel -Parent $pnlConn -Text "Каталог информационной базы:" -Left $labelLeft -Top (($rowHeight * 2) + 3)
     $fileBaseValue = ""
     if (-not $IsServer) { $fileBaseValue = [string]$Existing.InfobasePath }
-    $tbFileBase = Add-FormTextBox -Parent $tab1C -Left $fieldLeft -Top ($topStart + ($rowHeight * 3)) -Width $fieldWidth -Value $fileBaseValue
+    $tbFileBase = Add-FormTextBox -Parent $pnlConn -Left $fieldLeft -Top ($rowHeight * 2) -Width $fieldWidth -Value $fileBaseValue
 
     $btnBrowseBase = New-Object System.Windows.Forms.Button
     $btnBrowseBase.Text = "Обзор..."
-    $btnBrowseBase.Left = $browseLeft; $btnBrowseBase.Top = $topStart + ($rowHeight * 3)
+    $btnBrowseBase.Left = $browseLeft; $btnBrowseBase.Top = $rowHeight * 2
     $btnBrowseBase.Width = $browseWidth; $btnBrowseBase.Height = 22
     $btnBrowseBase.Add_Click({
         $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
@@ -855,9 +894,9 @@ function Show-SettingsForm {
             $tbFileBase.Text = $dlg.SelectedPath
         }
     })
-    $tab1C.Controls.Add($btnBrowseBase)
+    $pnlConn.Controls.Add($btnBrowseBase)
 
-    $lbl3 = Add-FormLabel -Parent $tab1C -Text "Кластер серверов:" -Left $labelLeft -Top ($topStart + ($rowHeight * 4) + 3)
+    $lbl3 = Add-FormLabel -Parent $pnlConn -Text "Кластер серверов:" -Left $labelLeft -Top (($rowHeight * 3) + 3)
     $serverHostValue = ""
     $serverBaseValue = ""
     if ($IsServer -and $Existing.InfobasePath) {
@@ -865,27 +904,10 @@ function Show-SettingsForm {
         if ($parts.Count -ge 1) { $serverHostValue = $parts[0] }
         if ($parts.Count -ge 2) { $serverBaseValue = $parts[1] }
     }
-    $tbServerHost = Add-FormTextBox -Parent $tab1C -Left $fieldLeft -Top ($topStart + ($rowHeight * 4)) -Width ($fieldWidth + $browseWidth + 10) -Value $serverHostValue
+    $tbServerHost = Add-FormTextBox -Parent $pnlConn -Left $fieldLeft -Top ($rowHeight * 3) -Width ($fieldWidth + $browseWidth + 10) -Value $serverHostValue
 
-    $lbl4 = Add-FormLabel -Parent $tab1C -Text "Имя информационной базы:" -Left $labelLeft -Top ($topStart + ($rowHeight * 5) + 3)
-    $tbServerBase = Add-FormTextBox -Parent $tab1C -Left $fieldLeft -Top ($topStart + ($rowHeight * 5)) -Width ($fieldWidth + $browseWidth + 10) -Value $serverBaseValue
-
-    [void](Add-FormLabel -Parent $tab1C -Text "Пользователь 1С:" -Left $labelLeft -Top ($topStart + ($rowHeight * 6) + 3))
-    $userValue = "Admin"
-    if ($Existing.User) { $userValue = $Existing.User }
-    $tbUser = Add-FormTextBox -Parent $tab1C -Left $fieldLeft -Top ($topStart + ($rowHeight * 6)) -Width ($fieldWidth + $browseWidth + 10) -Value $userValue
-
-    [void](Add-FormLabel -Parent $tab1C -Text "Пароль 1С:" -Left $labelLeft -Top ($topStart + ($rowHeight * 7) + 3))
-    $tbPass = Add-FormTextBox -Parent $tab1C -Left $fieldLeft -Top ($topStart + ($rowHeight * 7)) -Width ($fieldWidth + $browseWidth + 10)
-    $tbPass.UseSystemPasswordChar = $true
-
-    $chkShow = New-Object System.Windows.Forms.CheckBox
-    $chkShow.Text = "Показать пароль 1С"
-    $chkShow.Left = $fieldLeft
-    $chkShow.Top = $topStart + ($rowHeight * 8) - 2
-    $chkShow.Width = 220
-    $chkShow.Add_CheckedChanged({ $tbPass.UseSystemPasswordChar = -not $chkShow.Checked })
-    $tab1C.Controls.Add($chkShow)
+    $lbl4 = Add-FormLabel -Parent $pnlConn -Text "Имя информационной базы:" -Left $labelLeft -Top (($rowHeight * 4) + 3)
+    $tbServerBase = Add-FormTextBox -Parent $pnlConn -Left $fieldLeft -Top ($rowHeight * 4) -Width ($fieldWidth + $browseWidth + 10) -Value $serverBaseValue
 
     $UpdateVisibility = {
         if ($rbServer.Checked) {
@@ -902,6 +924,113 @@ function Show-SettingsForm {
     $rbFile.Add_CheckedChanged($UpdateVisibility)
     $rbServer.Add_CheckedChanged($UpdateVisibility)
     & $UpdateVisibility
+
+    $authTop = $topStart + ($rowHeight * 2)
+    $lblUser = Add-FormLabel -Parent $tabSettings -Text "Пользователь 1С:" -Left $labelLeft -Top ($authTop + 3)
+    $userValue = "Admin"
+    if ($Existing.User) { $userValue = $Existing.User }
+    $tbUser = Add-FormTextBox -Parent $tabSettings -Left $fieldLeft -Top $authTop -Width ($fieldWidth + $browseWidth + 10) -Value $userValue
+
+    $lblPass = Add-FormLabel -Parent $tabSettings -Text "Пароль 1С:" -Left $labelLeft -Top ($authTop + $rowHeight + 3)
+    $tbPass = Add-FormTextBox -Parent $tabSettings -Left $fieldLeft -Top ($authTop + $rowHeight) -Width ($fieldWidth + $browseWidth + 10)
+    $tbPass.UseSystemPasswordChar = $true
+
+    $chkShow = New-Object System.Windows.Forms.CheckBox
+    $chkShow.Text = "Показать пароль"
+    $chkShow.Left = $fieldLeft
+    $chkShow.Top = $authTop + ($rowHeight * 2) - 2
+    $chkShow.Width = 220
+    $chkShow.Add_CheckedChanged({ $tbPass.UseSystemPasswordChar = -not $chkShow.Checked })
+    $tabSettings.Controls.Add($chkShow)
+
+    $gitTop = $authTop + ($rowHeight * 3) + 8
+    $lblRepo = Add-FormLabel -Parent $tabSettings -Text "URL Git-репозитория:" -Left $labelLeft -Top ($gitTop + 3)
+    $tbRepo = Add-FormTextBox -Parent $tabSettings -Left $fieldLeft -Top $gitTop -Width ($fieldWidth + $browseWidth + 10) -Value ([string]$Existing.GitRepoUrl)
+    $tip.SetToolTip($tbRepo, "При первом запуске Git покажет окно авторизации")
+
+    $lblBranch = Add-FormLabel -Parent $tabSettings -Text "Ветка:" -Left $labelLeft -Top ($gitTop + $rowHeight + 3)
+    $branchValue = "main"
+    if ($Existing.GitBranch) { $branchValue = $Existing.GitBranch }
+    $tbBranch = Add-FormTextBox -Parent $tabSettings -Left $fieldLeft -Top ($gitTop + $rowHeight) -Width ($fieldWidth + $browseWidth + 10) -Value $branchValue
+    $tip.SetToolTip($tbBranch, "Если ветки ещё нет на сервере, она будет создана при первой отправке")
+
+    $chkAutoPush = New-Object System.Windows.Forms.CheckBox
+    $chkAutoPush.Text = "Отправлять коммит без подтверждения"
+    $chkAutoPush.Left = $fieldLeft
+    $chkAutoPush.Top = $gitTop + ($rowHeight * 2) + 4
+    $chkAutoPush.Width = 400
+    $chkAutoPush.Checked = [bool]$Existing.AutoConfirmGitPush
+    $tabSettings.Controls.Add($chkAutoPush)
+    $tip.SetToolTip($chkAutoPush, "Окно со списком изменений не показывается: коммит и push выполняются сразу")
+
+    $lnkGitExtra = Add-FormLinkLabel -Parent $tabSettings -Text "Дополнительно" -Left $fieldLeft -Top ($gitTop + ($rowHeight * 3) + 2) -Width 160
+
+    $pnlGitExtra = New-Object System.Windows.Forms.Panel
+    $pnlGitExtra.Left = $labelLeft
+    $pnlGitExtra.Top = $gitTop + ($rowHeight * 4)
+    $pnlGitExtra.Width = 640
+    $pnlGitExtra.Height = 44
+    $pnlGitExtra.Visible = $false
+    $tabSettings.Controls.Add($pnlGitExtra)
+
+    $btnCleanClone = New-Object System.Windows.Forms.Button
+    $btnCleanClone.Text = "Начать с чистого клона"
+    $btnCleanClone.Left = 0
+    $btnCleanClone.Top = 4
+    $btnCleanClone.Width = 210
+    $btnCleanClone.Height = 28
+    $pnlGitExtra.Controls.Add($btnCleanClone)
+    $tip.SetToolTip($btnCleanClone, "Удалит локальную копию workdir\repo и склонирует репозиторий заново")
+
+    $lblCleanClone = New-Object System.Windows.Forms.Label
+    $lblCleanClone.Text = "Удалит локальную копию и клонирует репозиторий заново."
+    $lblCleanClone.Left = 220; $lblCleanClone.Top = 8
+    $lblCleanClone.Width = 400; $lblCleanClone.Height = 28
+    $lblCleanClone.ForeColor = [System.Drawing.Color]::Gray
+    $pnlGitExtra.Controls.Add($lblCleanClone)
+
+    $RelayoutSettings = {
+        $y = $topStart + ($rowHeight * 2) - 4
+        if ($pnlConn.Visible) { $y += $pnlConn.Height + 8 }
+        $lblUser.Top = $y + 3
+        $tbUser.Top = $y
+        $y += $rowHeight
+        $lblPass.Top = $y + 3
+        $tbPass.Top = $y
+        $y += $rowHeight
+        $chkShow.Top = $y - 2
+        $y += $rowHeight + 8
+        $lblRepo.Top = $y + 3
+        $tbRepo.Top = $y
+        $y += $rowHeight
+        $lblBranch.Top = $y + 3
+        $tbBranch.Top = $y
+        $y += $rowHeight
+        $chkAutoPush.Top = $y + 4
+        $y += $rowHeight
+        $lnkGitExtra.Top = $y + 2
+        $y += 24
+        $pnlGitExtra.Top = $y
+    }
+
+    $lnkConnExtra.Add_LinkClicked({
+        $pnlConn.Visible = -not $pnlConn.Visible
+        if ($pnlConn.Visible) { $lnkConnExtra.Text = "Скрыть параметры подключения" }
+        else { $lnkConnExtra.Text = "Параметры подключения" }
+        & $RelayoutSettings
+    })
+    $lnkGitExtra.Add_LinkClicked({
+        $pnlGitExtra.Visible = -not $pnlGitExtra.Visible
+        if ($pnlGitExtra.Visible) { $lnkGitExtra.Text = "Скрыть дополнительно" }
+        else { $lnkGitExtra.Text = "Дополнительно" }
+        & $RelayoutSettings
+    })
+
+    if (-not (Test-Path -LiteralPath $tbPlatform.Text)) {
+        $pnlConn.Visible = $true
+        $lnkConnExtra.Text = "Скрыть параметры подключения"
+    }
+    & $RelayoutSettings
 
     $script:IBaseComboItems = @()
     $script:IBasesExtraFile = $null
@@ -942,6 +1071,25 @@ function Show-SettingsForm {
         $script:IBasesUpdating = $false
     }
 
+    $GetConnectionSummary = {
+        $ib = ""
+        if ($rbServer.Checked) {
+            $h = $tbServerHost.Text.Trim(); $n = $tbServerBase.Text.Trim()
+            if ($h -or $n) { $ib = "$h\$n" }
+        }
+        else { $ib = $tbFileBase.Text.Trim() }
+        if (-not $ib) { $ib = "не выбрана" }
+        $branch = $tbBranch.Text.Trim()
+        if (-not $branch) { $branch = "main" }
+        return "База: $ib    Ветка: $branch"
+    }
+
+    $UpdateSummaries = {
+        $text = & $GetConnectionSummary
+        $lblDumpSummary.Text = $text
+        $lblLoadSummary.Text = $text
+    }
+
     $cbIBases.Add_SelectedIndexChanged({
         if ($script:IBasesUpdating) { return }
         $sel = $cbIBases.SelectedIndex
@@ -957,6 +1105,7 @@ function Show-SettingsForm {
             $tbServerBase.Text = $item.Ref
             $rbServer.Checked = $true
         }
+        & $UpdateSummaries
     })
 
     $btnBrowseV8i.Add_Click({
@@ -972,145 +1121,134 @@ function Show-SettingsForm {
             if ($rbServer.Checked) { $currentPath = "$($tbServerHost.Text.Trim())\$($tbServerBase.Text.Trim())" }
             else { $currentPath = $tbFileBase.Text.Trim() }
             & $FillIBaseCombo $script:IBasesExtraFile $currentPath
+            & $UpdateSummaries
         }
     })
 
+    foreach ($tb in @($tbFileBase, $tbServerHost, $tbServerBase, $tbBranch)) {
+        $tb.Add_TextChanged({ & $UpdateSummaries })
+    }
+
     & $FillIBaseCombo "" ([string]$Existing.InfobasePath)
 
-    # --- Вкладка «Git» ---
-    [void](Add-FormLabel -Parent $tabGit -Text "URL Git-репозитория:" -Left $labelLeft -Top ($topStart + 3))
-    $tbRepo = Add-FormTextBox -Parent $tabGit -Left $fieldLeft -Top $topStart -Width ($fieldWidth + $browseWidth + 10) -Value ([string]$Existing.GitRepoUrl)
-
-    $lblHint = New-Object System.Windows.Forms.Label
-    $lblHint.Text = "При первом запуске Git покажет окно авторизации."
-    $lblHint.Left = $fieldLeft
-    $lblHint.Top = $topStart + $rowHeight - 4
-    $lblHint.Width = 400; $lblHint.Height = 20
-    $lblHint.ForeColor = [System.Drawing.Color]::Gray
-    $tabGit.Controls.Add($lblHint)
-
-    [void](Add-FormLabel -Parent $tabGit -Text "Ветка:" -Left $labelLeft -Top ($topStart + ($rowHeight * 2) + 3))
-    $branchValue = "main"
-    if ($Existing.GitBranch) { $branchValue = $Existing.GitBranch }
-    $tbBranch = Add-FormTextBox -Parent $tabGit -Left $fieldLeft -Top ($topStart + ($rowHeight * 2)) -Width ($fieldWidth + $browseWidth + 10) -Value $branchValue
-
-    $lblBranchHint = New-Object System.Windows.Forms.Label
-    $lblBranchHint.Text = "Если ветки ещё нет на сервере, она будет создана при первой отправке."
-    $lblBranchHint.Left = $fieldLeft
-    $lblBranchHint.Top = $topStart + ($rowHeight * 3) - 4
-    $lblBranchHint.Width = 400; $lblBranchHint.Height = 36
-    $lblBranchHint.ForeColor = [System.Drawing.Color]::Gray
-    $tabGit.Controls.Add($lblBranchHint)
-
-    $chkAutoPush = New-Object System.Windows.Forms.CheckBox
-    $chkAutoPush.Text = "Отправлять коммит без подтверждения"
-    $chkAutoPush.Left = $labelLeft
-    $chkAutoPush.Top = $topStart + ($rowHeight * 4) + 8
-    $chkAutoPush.Width = 500
-    $chkAutoPush.Checked = [bool]$Existing.AutoConfirmGitPush
-    $tabGit.Controls.Add($chkAutoPush)
-
-    $lblAutoPushHint = New-Object System.Windows.Forms.Label
-    $lblAutoPushHint.Text = "Если включено, окно со списком изменений не показывается: коммит и push выполняются сразу. Смена URL меняет origin без удаления файлов."
-    $lblAutoPushHint.Left = $labelLeft
-    $lblAutoPushHint.Top = $topStart + ($rowHeight * 5) + 10
-    $lblAutoPushHint.Width = 610; $lblAutoPushHint.Height = 40
-    $lblAutoPushHint.ForeColor = [System.Drawing.Color]::Gray
-    $tabGit.Controls.Add($lblAutoPushHint)
-
-    $btnCleanClone = New-Object System.Windows.Forms.Button
-    $btnCleanClone.Text = "Начать с чистого клона"
-    $btnCleanClone.Left = $labelLeft
-    $btnCleanClone.Top = $topStart + ($rowHeight * 7)
-    $btnCleanClone.Width = 210
-    $btnCleanClone.Height = 28
-    $tabGit.Controls.Add($btnCleanClone)
-
-    $lblCleanClone = New-Object System.Windows.Forms.Label
-    $lblCleanClone.Text = "Удалит локальную копию workdir\\repo и склонирует репозиторий заново."
-    $lblCleanClone.Left = $labelLeft + 220
-    $lblCleanClone.Top = $topStart + ($rowHeight * 7) + 4
-    $lblCleanClone.Width = 390; $lblCleanClone.Height = 36
-    $lblCleanClone.ForeColor = [System.Drawing.Color]::Gray
-    $tabGit.Controls.Add($lblCleanClone)
+    $GoToSettings = {
+        $tabs.SelectedTab = $tabSettings
+        $cbIBases.Focus()
+    }
 
     # --- Вкладка «Выгрузка» ---
+    $lblDumpSummary = New-Object System.Windows.Forms.Label
+    $lblDumpSummary.Left = $labelLeft; $lblDumpSummary.Top = $topStart
+    $lblDumpSummary.Width = 520; $lblDumpSummary.Height = 22
+    $lblDumpSummary.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+    $tabDump.Controls.Add($lblDumpSummary)
+
+    $lnkDumpSettings = Add-FormLinkLabel -Parent $tabDump -Text "Изменить подключение" -Left 540 -Top $topStart -Width 150
+    $lnkDumpSettings.Add_LinkClicked({ & $GoToSettings })
+
     $chkMain = New-Object System.Windows.Forms.CheckBox
     $chkMain.Text = "Основная конфигурация"
-    $chkMain.Left = $labelLeft; $chkMain.Top = $topStart
+    $chkMain.Left = $labelLeft; $chkMain.Top = $topStart + 40
     $chkMain.Width = 400
     $chkMain.Checked = [bool]$Existing.ExportMainConfig
     $tabDump.Controls.Add($chkMain)
 
     $chkExt = New-Object System.Windows.Forms.CheckBox
     $chkExt.Text = "Расширения"
-    $chkExt.Left = $labelLeft; $chkExt.Top = $topStart + $rowHeight
+    $chkExt.Left = $labelLeft; $chkExt.Top = $topStart + 72
     $chkExt.Width = 400
     $chkExt.Checked = [bool]$Existing.ExportExtensions
     $tabDump.Controls.Add($chkExt)
 
     $chkManual = New-Object System.Windows.Forms.CheckBox
     $chkManual.Text = "Выбрать расширения вручную"
-    $chkManual.Left = $labelLeft + 24; $chkManual.Top = $topStart + ($rowHeight * 2)
+    $chkManual.Left = $labelLeft + 24; $chkManual.Top = $topStart + 100
     $chkManual.Width = 400
     $chkManual.Checked = [bool]$Existing.SelectExtensionsManually
+    $chkManual.Enabled = $chkExt.Checked
     $tabDump.Controls.Add($chkManual)
+    $chkExt.Add_CheckedChanged({ $chkManual.Enabled = $chkExt.Checked })
 
-    [void](Add-FormLabel -Parent $tabDump -Text "Префикс исключения:" -Left $labelLeft -Top ($topStart + ($rowHeight * 3) + 3))
+    $lnkDumpExtra = Add-FormLinkLabel -Parent $tabDump -Text "Дополнительно" -Left $labelLeft -Top ($topStart + 136) -Width 160
+
+    $pnlDumpExtra = New-Object System.Windows.Forms.Panel
+    $pnlDumpExtra.Left = $labelLeft
+    $pnlDumpExtra.Top = $topStart + 158
+    $pnlDumpExtra.Width = 640
+    $pnlDumpExtra.Height = 90
+    $pnlDumpExtra.Visible = $false
+    $tabDump.Controls.Add($pnlDumpExtra)
+
+    [void](Add-FormLabel -Parent $pnlDumpExtra -Text "Префикс исключения:" -Left 0 -Top 3 -Width 180)
     $prefixValue = "EF_"
     if ($null -ne $Existing.ExtensionExcludePrefix) { $prefixValue = [string]$Existing.ExtensionExcludePrefix }
-    $tbPrefix = Add-FormTextBox -Parent $tabDump -Left $fieldLeft -Top ($topStart + ($rowHeight * 3)) -Width 160 -Value $prefixValue
+    $tbPrefix = Add-FormTextBox -Parent $pnlDumpExtra -Left 190 -Top 0 -Width 160 -Value $prefixValue
+    $tip.SetToolTip($tbPrefix, "Расширения с этим префиксом не выгружаются, если список не выбирается вручную")
 
-    $lblPrefixHint = New-Object System.Windows.Forms.Label
-    $lblPrefixHint.Text = "Для кнопки «Выполнить всё» состав задают флажки выше. Отдельные кнопки всегда делают только своё действие."
-    $lblPrefixHint.Left = $labelLeft
-    $lblPrefixHint.Top = $topStart + ($rowHeight * 4) + 8
-    $lblPrefixHint.Width = 610; $lblPrefixHint.Height = 36
-    $lblPrefixHint.ForeColor = [System.Drawing.Color]::Gray
-    $tabDump.Controls.Add($lblPrefixHint)
-
-    [void](Add-FormLabel -Parent $tabDump -Text "Режим выгрузки:" -Left $labelLeft -Top ($topStart + ($rowHeight * 6) + 3) -Width 210)
-
-    $rbDumpAuto = New-Object System.Windows.Forms.RadioButton
-    $rbDumpAuto.Text = "Авто (полная, если каталог пустой)"
-    $rbDumpAuto.Left = $fieldLeft
-    $rbDumpAuto.Top = $topStart + ($rowHeight * 6)
-    $rbDumpAuto.Width = 380
-    $tabDump.Controls.Add($rbDumpAuto)
-
-    $rbDumpFull = New-Object System.Windows.Forms.RadioButton
-    $rbDumpFull.Text = "Полная (каталог очищается)"
-    $rbDumpFull.Left = $fieldLeft
-    $rbDumpFull.Top = $topStart + ($rowHeight * 7)
-    $rbDumpFull.Width = 380
-    $tabDump.Controls.Add($rbDumpFull)
-
-    $rbDumpInc = New-Object System.Windows.Forms.RadioButton
-    $rbDumpInc.Text = "Инкрементальная (-update)"
-    $rbDumpInc.Left = $fieldLeft
-    $rbDumpInc.Top = $topStart + ($rowHeight * 8)
-    $rbDumpInc.Width = 380
-    $tabDump.Controls.Add($rbDumpInc)
-
+    [void](Add-FormLabel -Parent $pnlDumpExtra -Text "Режим выгрузки:" -Left 0 -Top 35 -Width 180)
+    $cbDumpMode = New-Object System.Windows.Forms.ComboBox
+    $cbDumpMode.Left = 190; $cbDumpMode.Top = 32
+    $cbDumpMode.Width = 380
+    $cbDumpMode.DropDownStyle = "DropDownList"
+    [void]$cbDumpMode.Items.Add("Авто (полная, если каталог пустой)")
+    [void]$cbDumpMode.Items.Add("Полная (каталог очищается)")
+    [void]$cbDumpMode.Items.Add("Инкрементальная (-update)")
     $dumpMode = [string]$Existing.DumpMode
-    if ($dumpMode -eq "Full") { $rbDumpFull.Checked = $true }
-    elseif ($dumpMode -eq "Incremental") { $rbDumpInc.Checked = $true }
-    else { $rbDumpAuto.Checked = $true }
+    if ($dumpMode -eq "Full") { $cbDumpMode.SelectedIndex = 1 }
+    elseif ($dumpMode -eq "Incremental") { $cbDumpMode.SelectedIndex = 2 }
+    else { $cbDumpMode.SelectedIndex = 0 }
+    $pnlDumpExtra.Controls.Add($cbDumpMode)
+
+    $lnkDumpExtra.Add_LinkClicked({
+        $pnlDumpExtra.Visible = -not $pnlDumpExtra.Visible
+        if ($pnlDumpExtra.Visible) { $lnkDumpExtra.Text = "Скрыть дополнительно" }
+        else { $lnkDumpExtra.Text = "Дополнительно" }
+    })
+
+    $pnlDumpActions = New-Object System.Windows.Forms.Panel
+    $pnlDumpActions.Dock = "Bottom"
+    $pnlDumpActions.Height = 50
+    $tabDump.Controls.Add($pnlDumpActions)
+
+    $btnDump = New-Object System.Windows.Forms.Button
+    $btnDump.Text = "Выгрузить в Git"
+    $btnDump.Width = 180; $btnDump.Height = 34
+    $btnDump.Left = $labelLeft
+    $btnDump.Top = 8
+    $pnlDumpActions.Controls.Add($btnDump)
+    $tip.SetToolTip($btnDump, "Выгружает отмеченный состав и отправляет коммит в Git")
+
+    $btnGit = New-Object System.Windows.Forms.Button
+    $btnGit.Text = "Только Git"
+    $btnGit.Width = 120; $btnGit.Height = 34
+    $btnGit.Left = $labelLeft + 190
+    $btnGit.Top = 8
+    $pnlDumpActions.Controls.Add($btnGit)
+    $tip.SetToolTip($btnGit, "Только commit и push уже выгруженных файлов")
 
     # --- Вкладка «Загрузка» ---
+    $lblLoadSummary = New-Object System.Windows.Forms.Label
+    $lblLoadSummary.Left = $labelLeft; $lblLoadSummary.Top = $topStart
+    $lblLoadSummary.Width = 520; $lblLoadSummary.Height = 22
+    $lblLoadSummary.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+    $tabLoad.Controls.Add($lblLoadSummary)
+
+    $lnkLoadSettings = Add-FormLinkLabel -Parent $tabLoad -Text "Изменить подключение" -Left 540 -Top $topStart -Width 150
+    $lnkLoadSettings.Add_LinkClicked({ & $GoToSettings })
+
     $lblLoadWarn = New-Object System.Windows.Forms.Label
-    $lblLoadWarn.Text = "Загрузка заменяет конфигурацию в базе 1С файлами из Git. Закройте конфигуратор и пользовательские сеансы. Сделайте копию базы, если данные нельзя потерять."
+    $lblLoadWarn.Text = "Конфигурация в базе 1С будет заменена файлами из Git. Закройте конфигуратор и сеансы, при необходимости сделайте копию базы."
     $lblLoadWarn.Left = $labelLeft
-    $lblLoadWarn.Top = $topStart
-    $lblLoadWarn.Width = 650
-    $lblLoadWarn.Height = 50
+    $lblLoadWarn.Top = $topStart + 32
+    $lblLoadWarn.Width = 660
+    $lblLoadWarn.Height = 40
     $lblLoadWarn.ForeColor = [System.Drawing.Color]::Firebrick
     $tabLoad.Controls.Add($lblLoadWarn)
 
     $chkLoadMain = New-Object System.Windows.Forms.CheckBox
     $chkLoadMain.Text = "Основная конфигурация"
     $chkLoadMain.Left = $labelLeft
-    $chkLoadMain.Top = $topStart + ($rowHeight * 2)
+    $chkLoadMain.Top = $topStart + 84
     $chkLoadMain.Width = 400
     $chkLoadMain.Checked = [bool]$Existing.LoadMainConfig
     $tabLoad.Controls.Add($chkLoadMain)
@@ -1118,7 +1256,7 @@ function Show-SettingsForm {
     $chkLoadExt = New-Object System.Windows.Forms.CheckBox
     $chkLoadExt.Text = "Расширения"
     $chkLoadExt.Left = $labelLeft
-    $chkLoadExt.Top = $topStart + ($rowHeight * 3)
+    $chkLoadExt.Top = $topStart + 116
     $chkLoadExt.Width = 400
     $chkLoadExt.Checked = [bool]$Existing.LoadExtensions
     $tabLoad.Controls.Add($chkLoadExt)
@@ -1126,66 +1264,76 @@ function Show-SettingsForm {
     $chkLoadManual = New-Object System.Windows.Forms.CheckBox
     $chkLoadManual.Text = "Выбрать расширения вручную (из папки Git)"
     $chkLoadManual.Left = $labelLeft + 24
-    $chkLoadManual.Top = $topStart + ($rowHeight * 4)
+    $chkLoadManual.Top = $topStart + 144
     $chkLoadManual.Width = 500
     $chkLoadManual.Checked = [bool]$Existing.LoadSelectExtensionsManually
+    $chkLoadManual.Enabled = $chkLoadExt.Checked
     $tabLoad.Controls.Add($chkLoadManual)
+    $chkLoadExt.Add_CheckedChanged({ $chkLoadManual.Enabled = $chkLoadExt.Checked })
 
     $chkUpdateDB = New-Object System.Windows.Forms.CheckBox
-    $chkUpdateDB.Text = "Обновить конфигурацию базы данных (UpdateDBCfg)"
+    $chkUpdateDB.Text = "Обновить конфигурацию базы данных"
     $chkUpdateDB.Left = $labelLeft
-    $chkUpdateDB.Top = $topStart + ($rowHeight * 5) + 4
-    $chkUpdateDB.Width = 620
+    $chkUpdateDB.Top = $topStart + 180
+    $chkUpdateDB.Width = 500
     $chkUpdateDB.Checked = [bool]$Existing.UpdateInfobaseCfg
     $tabLoad.Controls.Add($chkUpdateDB)
+    $tip.SetToolTip($chkUpdateDB, "UpdateDBCfg после загрузки файлов")
+
+    $lnkLoadExtra = Add-FormLinkLabel -Parent $tabLoad -Text "Дополнительно" -Left $labelLeft -Top ($topStart + 212) -Width 160
+
+    $pnlLoadExtra = New-Object System.Windows.Forms.Panel
+    $pnlLoadExtra.Left = $labelLeft
+    $pnlLoadExtra.Top = $topStart + 234
+    $pnlLoadExtra.Width = 640
+    $pnlLoadExtra.Height = 36
+    $pnlLoadExtra.Visible = $false
+    $tabLoad.Controls.Add($pnlLoadExtra)
 
     $chkDynamic = New-Object System.Windows.Forms.CheckBox
     $chkDynamic.Text = "Динамическое обновление (без монопольного доступа)"
-    $chkDynamic.Left = $labelLeft + 24
-    $chkDynamic.Top = $topStart + ($rowHeight * 6) + 4
+    $chkDynamic.Left = 24; $chkDynamic.Top = 4
     $chkDynamic.Width = 600
     $chkDynamic.Checked = [bool]$Existing.DynamicUpdateCfg
-    $tabLoad.Controls.Add($chkDynamic)
+    $chkDynamic.Enabled = $chkUpdateDB.Checked
+    $pnlLoadExtra.Controls.Add($chkDynamic)
+    $chkUpdateDB.Add_CheckedChanged({ $chkDynamic.Enabled = $chkUpdateDB.Checked })
 
-    $lblLoadHint = New-Object System.Windows.Forms.Label
-    $lblLoadHint.Text = "Перед загрузкой выполняется git fetch и сброс локальной копии к origin выбранной ветки. Кнопка «Загрузить в 1С» внизу."
-    $lblLoadHint.Left = $labelLeft
-    $lblLoadHint.Top = $topStart + ($rowHeight * 8)
-    $lblLoadHint.Width = 650
-    $lblLoadHint.Height = 40
-    $lblLoadHint.ForeColor = [System.Drawing.Color]::Gray
-    $tabLoad.Controls.Add($lblLoadHint)
+    $lnkLoadExtra.Add_LinkClicked({
+        $pnlLoadExtra.Visible = -not $pnlLoadExtra.Visible
+        if ($pnlLoadExtra.Visible) { $lnkLoadExtra.Text = "Скрыть дополнительно" }
+        else { $lnkLoadExtra.Text = "Дополнительно" }
+    })
 
-    $btnTop = 378
-    $btnAll = New-Object System.Windows.Forms.Button
-    $btnAll.Text = "Выполнить всё"
-    $btnAll.Left = 15; $btnAll.Top = $btnTop; $btnAll.Width = 108; $btnAll.Height = 30
-    $btnAll.Anchor = "Top,Left"
-    $form.Controls.Add($btnAll)
-
-    $btnConfig = New-Object System.Windows.Forms.Button
-    $btnConfig.Text = "Конфигурация"
-    $btnConfig.Left = 127; $btnConfig.Top = $btnTop; $btnConfig.Width = 100; $btnConfig.Height = 30
-    $form.Controls.Add($btnConfig)
-
-    $btnExt = New-Object System.Windows.Forms.Button
-    $btnExt.Text = "Расширения"
-    $btnExt.Left = 231; $btnExt.Top = $btnTop; $btnExt.Width = 95; $btnExt.Height = 30
-    $form.Controls.Add($btnExt)
-
-    $btnGit = New-Object System.Windows.Forms.Button
-    $btnGit.Text = "Синхронизация Git"
-    $btnGit.Left = 330; $btnGit.Top = $btnTop; $btnGit.Width = 125; $btnGit.Height = 30
-    $form.Controls.Add($btnGit)
+    $pnlLoadActions = New-Object System.Windows.Forms.Panel
+    $pnlLoadActions.Dock = "Bottom"
+    $pnlLoadActions.Height = 50
+    $tabLoad.Controls.Add($pnlLoadActions)
 
     $btnLoad = New-Object System.Windows.Forms.Button
     $btnLoad.Text = "Загрузить в 1С"
-    $btnLoad.Left = 459; $btnLoad.Top = $btnTop; $btnLoad.Width = 125; $btnLoad.Height = 30
-    $form.Controls.Add($btnLoad)
+    $btnLoad.Width = 180; $btnLoad.Height = 34
+    $btnLoad.Left = $labelLeft
+    $btnLoad.Top = 8
+    $pnlLoadActions.Controls.Add($btnLoad)
+    $tip.SetToolTip($btnLoad, "Заменяет конфигурацию в базе файлами из выбранной ветки Git")
+
+    & $UpdateSummaries
+    $tabs.Add_SelectedIndexChanged({ & $UpdateSummaries })
+
+    # --- Нижняя панель: статус, прогресс, журнал ---
+    $lblStatus = New-Object System.Windows.Forms.Label
+    $lblStatus.Text = "Готово к запуску"
+    $lblStatus.Left = 5; $lblStatus.Top = 6
+    $lblStatus.Width = 590; $lblStatus.Height = 22
+    $lblStatus.Anchor = "Top,Left,Right"
+    $lblStatus.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+    $pnlBottom.Controls.Add($lblStatus)
 
     $btnCancelOp = New-Object System.Windows.Forms.Button
     $btnCancelOp.Text = "Отмена"
-    $btnCancelOp.Left = 620; $btnCancelOp.Top = $btnTop; $btnCancelOp.Width = 90; $btnCancelOp.Height = 30
+    $btnCancelOp.Left = 605; $btnCancelOp.Top = 2
+    $btnCancelOp.Width = 90; $btnCancelOp.Height = 28
     $btnCancelOp.Enabled = $false
     $btnCancelOp.Anchor = "Top,Right"
     $btnCancelOp.Add_Click({
@@ -1195,44 +1343,26 @@ function Show-SettingsForm {
         Write-Log "Запрошена отмена операции"
         Stop-TrackedProcess -Proc $script:CurrentProcess
     })
-    $form.Controls.Add($btnCancelOp)
-
-    $txtTiming = New-Object System.Windows.Forms.TextBox
-    $txtTiming.Multiline = $true
-    $txtTiming.ReadOnly = $true
-    $txtTiming.TabStop = $false
-    $txtTiming.Left = 15
-    $txtTiming.Top = 416
-    $txtTiming.Width = 695
-    $txtTiming.Height = 88
-    $txtTiming.Anchor = "Top,Left,Right"
-    $txtTiming.Text = "Последняя операция ещё не выполнялась."
-    $form.Controls.Add($txtTiming)
-
-    $lblStatus = New-Object System.Windows.Forms.Label
-    $lblStatus.Text = "Готово к запуску"
-    $lblStatus.Left = 15; $lblStatus.Top = 512
-    $lblStatus.Width = 695; $lblStatus.Height = 22
-    $lblStatus.Anchor = "Top,Left,Right"
-    $lblStatus.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
-    $form.Controls.Add($lblStatus)
+    $pnlBottom.Controls.Add($btnCancelOp)
 
     $bar = New-Object System.Windows.Forms.ProgressBar
-    $bar.Left = 15; $bar.Top = 536
-    $bar.Width = 695; $bar.Height = 18
+    $bar.Left = 5; $bar.Top = 32
+    $bar.Width = 690; $bar.Height = 14
     $bar.Anchor = "Top,Left,Right"
     $bar.Minimum = 0; $bar.Maximum = 100; $bar.Value = 0
-    $form.Controls.Add($bar)
+    $bar.Visible = $false
+    $pnlBottom.Controls.Add($bar)
 
-    $lblLog = New-Object System.Windows.Forms.Label
-    $lblLog.Text = "Журнал:"
-    $lblLog.Left = 15; $lblLog.Top = 560; $lblLog.Width = 100
-    $lblLog.Anchor = "Top,Left"
-    $form.Controls.Add($lblLog)
+    $btnToggleLog = New-Object System.Windows.Forms.Button
+    $btnToggleLog.Text = "Показать журнал"
+    $btnToggleLog.Left = 5; $btnToggleLog.Top = 52
+    $btnToggleLog.Width = 150; $btnToggleLog.Height = 24
+    $btnToggleLog.Anchor = "Top,Left"
+    $pnlBottom.Controls.Add($btnToggleLog)
 
     $txtLog = New-Object System.Windows.Forms.TextBox
-    $txtLog.Left = 15; $txtLog.Top = 580
-    $txtLog.Width = 695; $txtLog.Height = 230
+    $txtLog.Left = 5; $txtLog.Top = 80
+    $txtLog.Width = 690; $txtLog.Height = 200
     $txtLog.Anchor = "Top,Bottom,Left,Right"
     $txtLog.Multiline = $true
     $txtLog.ScrollBars = "Vertical"
@@ -1240,7 +1370,26 @@ function Show-SettingsForm {
     $txtLog.Font = New-Object System.Drawing.Font("Consolas", 8)
     $txtLog.BackColor = [System.Drawing.Color]::FromArgb(30, 30, 30)
     $txtLog.ForeColor = [System.Drawing.Color]::LightGreen
-    $form.Controls.Add($txtLog)
+    $txtLog.Visible = $false
+    $pnlBottom.Controls.Add($txtLog)
+
+    $script:SetLogExpanded = {
+        param([bool]$Expanded)
+        $script:LogExpanded = $Expanded
+        if ($Expanded) {
+            $txtLog.Visible = $true
+            $pnlBottom.Height = 300
+            $btnToggleLog.Text = "Скрыть журнал"
+        }
+        else {
+            $txtLog.Visible = $false
+            $pnlBottom.Height = 92
+            $btnToggleLog.Text = "Показать журнал"
+        }
+    }
+    $btnToggleLog.Add_Click({
+        & $script:SetLogExpanded (-not $script:LogExpanded)
+    })
 
     $script:Ui = @{
         Form          = $form
@@ -1258,9 +1407,7 @@ function Show-SettingsForm {
         ChkExt        = $chkExt
         ChkManual     = $chkManual
         TbPrefix      = $tbPrefix
-        RbDumpAuto    = $rbDumpAuto
-        RbDumpFull    = $rbDumpFull
-        RbDumpInc     = $rbDumpInc
+        CbDumpMode    = $cbDumpMode
         ChkLoadMain   = $chkLoadMain
         ChkLoadExt    = $chkLoadExt
         ChkLoadManual = $chkLoadManual
@@ -1273,13 +1420,11 @@ function Show-SettingsForm {
     $script:ProgressBar          = $bar
     $script:ProgressLog          = $txtLog
     $script:ProgressCancelButton = $btnCancelOp
-    $script:TimingBox            = $txtTiming
+    $script:TimingBox            = $null
     $script:MainTabs             = $tabs
-    $script:ActionButtons        = @($btnAll, $btnConfig, $btnExt, $btnGit, $btnLoad, $btnCleanClone)
+    $script:ActionButtons        = @($btnDump, $btnGit, $btnLoad, $btnCleanClone)
 
-    $btnAll.Add_Click({ Start-UiAction -Action "all" })
-    $btnConfig.Add_Click({ Start-UiAction -Action "config" })
-    $btnExt.Add_Click({ Start-UiAction -Action "extensions" })
+    $btnDump.Add_Click({ Start-UiAction -Action "all" })
     $btnGit.Add_Click({ Start-UiAction -Action "git" })
     $btnLoad.Add_Click({ Start-UiAction -Action "load" })
     $btnCleanClone.Add_Click({ Start-UiAction -Action "reclone" })
@@ -1310,6 +1455,7 @@ function Show-SettingsForm {
         }
         Write-Log "Приложение запущено"
         Set-Status -Text "Готово к запуску" -Percent 0
+        if ($script:ProgressBar) { $script:ProgressBar.Visible = $false }
     })
 
     [void]$form.ShowDialog()
@@ -1332,8 +1478,12 @@ function Read-UiConfig {
     if (-not $branch) { $branch = "main" }
 
     $dumpMode = "Auto"
-    if ($ui.RbDumpFull.Checked) { $dumpMode = "Full" }
-    elseif ($ui.RbDumpInc.Checked) { $dumpMode = "Incremental" }
+    if ($ui.CbDumpMode) {
+        switch ([int]$ui.CbDumpMode.SelectedIndex) {
+            1 { $dumpMode = "Full" }
+            2 { $dumpMode = "Incremental" }
+        }
+    }
 
     return [PSCustomObject]@{
         Action                   = $Action
@@ -1398,8 +1548,10 @@ function Load-SavedConfig {
 
 function Set-TimingSummaryText {
     param([string]$Text)
-    if ($script:TimingBox -and -not $script:TimingBox.IsDisposed) {
-        $script:TimingBox.Text = $Text
+    $script:LastTimingSummary = $Text
+    if ($script:ProgressLabel -and -not $script:ProgressLabel.IsDisposed) {
+        $lines = @($Text -split "`r`n" | Where-Object { $_.Trim() })
+        $script:ProgressLabel.Text = (($lines | Select-Object -First 2) -join "  ·  ")
     }
 }
 
@@ -1469,7 +1621,12 @@ function Start-UiAction {
         Stop-DumpWatch
         Close-ProgressForm
         Set-MainFormBusy -Busy $false
-        Set-Status -Text "Готово к запуску"
+        if ($script:LastTimingSummary) {
+            Set-TimingSummaryText -Text $script:LastTimingSummary
+        }
+        else {
+            Set-Status -Text "Готово к запуску"
+        }
     }
 }
 
@@ -1514,11 +1671,11 @@ function Test-Config {
     }
 
     if ($action -eq "all" -and -not $Config.ExportMainConfig -and -not $Config.ExportExtensions) {
-        $errors += "Для «Выполнить всё» отметьте основную конфигурацию и/или расширения на вкладке «Выгрузка»"
+        $errors += "Для выгрузки отметьте основную конфигурацию и/или расширения"
     }
 
     if ($action -eq "load" -and -not $Config.LoadMainConfig -and -not $Config.LoadExtensions) {
-        $errors += "Для загрузки в 1С отметьте основную конфигурацию и/или расширения на вкладке «Загрузка»"
+        $errors += "Для загрузки в 1С отметьте основную конфигурацию и/или расширения"
     }
 
     $gitUrl = [string]$Config.GitRepoUrl
