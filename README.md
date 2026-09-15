@@ -2,6 +2,16 @@
 
 Windows-приложение на PowerShell: выгружает конфигурацию 1С в XML и отправляет её в Git.
 
+## Скачать
+
+Готовый архив программы лежит в [Releases](https://github.com/crabopal/1c-git-sync/releases/latest):
+
+https://github.com/crabopal/1c-git-sync/releases/latest/download/1c-git-sync.zip
+
+Git на клиентском компьютере не нужен: распакуйте ZIP, положите рядом `PortableGit-64-bit.7z.exe` и запустите `run.bat`.
+
+Раздел **Packages** на GitHub для этого не используется: там публикуют npm, NuGet и Docker-образы. Архив приложения — это **Releases**.
+
 ## Запуск
 
 1. Положите рядом с скриптом `PortableGit-64-bit.7z.exe` (портативный Git for Windows).
@@ -15,5 +25,6 @@ Windows-приложение на PowerShell: выгружает конфигу�
 - **Конфигурация** — только основная конфигурация
 - **Расширения** — только расширения
 - **Синхронизация Git** — commit и push уже выгруженных файлов в указанную ветку
+- **Загрузить в 1С** — загрузка конфигурации и расширений из Git в базу
 
 Настройки (кроме пароля 1С) сохраняются в `workdir/config.json`. Каталог `workdir` в репозиторий не входит.

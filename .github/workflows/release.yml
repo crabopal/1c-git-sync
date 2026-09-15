@@ -1,0 +1,35 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Тег релиза, например v1.0.1"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  pack:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build zip
+        run: |
+          mkdir -p dist/1c-git-sync
+          cp My1CApp.ps1 run.bat README.md dist/1c-git-sync/
+          cd dist
+          zip -r ../1c-git-sync.zip 1c-git-sync
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
+          files: 1c-git-sync.zip
+          generate_release_notes: true
+          fail_on_unmatched_files: true

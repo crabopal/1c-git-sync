@@ -557,6 +557,11 @@ function Get-DefaultConfig {
         SelectExtensionsManually   = $false
         ExtensionExcludePrefix     = "EF_"
         DumpMode                   = "Auto"
+        LoadMainConfig             = $true
+        LoadExtensions             = $true
+        LoadSelectExtensionsManually = $false
+        UpdateInfobaseCfg          = $true
+        DynamicUpdateCfg           = $false
     }
 }
 
@@ -623,6 +628,10 @@ function Show-SettingsForm {
     $tabs.TabPages.Add($tab1C)
     $tabs.TabPages.Add($tabGit)
     $tabs.TabPages.Add($tabDump)
+
+    $tabLoad = New-Object System.Windows.Forms.TabPage
+    $tabLoad.Text = "Загрузка"
+    $tabs.TabPages.Add($tabLoad)
 
     $labelLeft = 15; $fieldLeft = 230; $fieldWidth = 300; $browseLeft = 540; $browseWidth = 90
     $rowHeight = 32; $topStart = 20
@@ -862,27 +871,91 @@ function Show-SettingsForm {
     elseif ($dumpMode -eq "Incremental") { $rbDumpInc.Checked = $true }
     else { $rbDumpAuto.Checked = $true }
 
+    # --- Вкладка «Загрузка» ---
+    $lblLoadWarn = New-Object System.Windows.Forms.Label
+    $lblLoadWarn.Text = "Загрузка заменяет конфигурацию в базе 1С файлами из Git. Закройте конфигуратор и пользовательские сеансы. Сделайте копию базы, если данные нельзя потерять."
+    $lblLoadWarn.Left = $labelLeft
+    $lblLoadWarn.Top = $topStart
+    $lblLoadWarn.Width = 650
+    $lblLoadWarn.Height = 50
+    $lblLoadWarn.ForeColor = [System.Drawing.Color]::Firebrick
+    $tabLoad.Controls.Add($lblLoadWarn)
+
+    $chkLoadMain = New-Object System.Windows.Forms.CheckBox
+    $chkLoadMain.Text = "Основная конфигурация"
+    $chkLoadMain.Left = $labelLeft
+    $chkLoadMain.Top = $topStart + ($rowHeight * 2)
+    $chkLoadMain.Width = 400
+    $chkLoadMain.Checked = [bool]$Existing.LoadMainConfig
+    $tabLoad.Controls.Add($chkLoadMain)
+
+    $chkLoadExt = New-Object System.Windows.Forms.CheckBox
+    $chkLoadExt.Text = "Расширения"
+    $chkLoadExt.Left = $labelLeft
+    $chkLoadExt.Top = $topStart + ($rowHeight * 3)
+    $chkLoadExt.Width = 400
+    $chkLoadExt.Checked = [bool]$Existing.LoadExtensions
+    $tabLoad.Controls.Add($chkLoadExt)
+
+    $chkLoadManual = New-Object System.Windows.Forms.CheckBox
+    $chkLoadManual.Text = "Выбрать расширения вручную (из папки Git)"
+    $chkLoadManual.Left = $labelLeft + 24
+    $chkLoadManual.Top = $topStart + ($rowHeight * 4)
+    $chkLoadManual.Width = 500
+    $chkLoadManual.Checked = [bool]$Existing.LoadSelectExtensionsManually
+    $tabLoad.Controls.Add($chkLoadManual)
+
+    $chkUpdateDB = New-Object System.Windows.Forms.CheckBox
+    $chkUpdateDB.Text = "Обновить конфигурацию базы данных (UpdateDBCfg)"
+    $chkUpdateDB.Left = $labelLeft
+    $chkUpdateDB.Top = $topStart + ($rowHeight * 5) + 4
+    $chkUpdateDB.Width = 620
+    $chkUpdateDB.Checked = [bool]$Existing.UpdateInfobaseCfg
+    $tabLoad.Controls.Add($chkUpdateDB)
+
+    $chkDynamic = New-Object System.Windows.Forms.CheckBox
+    $chkDynamic.Text = "Динамическое обновление (без монопольного доступа)"
+    $chkDynamic.Left = $labelLeft + 24
+    $chkDynamic.Top = $topStart + ($rowHeight * 6) + 4
+    $chkDynamic.Width = 600
+    $chkDynamic.Checked = [bool]$Existing.DynamicUpdateCfg
+    $tabLoad.Controls.Add($chkDynamic)
+
+    $lblLoadHint = New-Object System.Windows.Forms.Label
+    $lblLoadHint.Text = "Перед загрузкой выполняется git fetch и сброс локальной копии к origin выбранной ветки. Кнопка «Загрузить в 1С» внизу."
+    $lblLoadHint.Left = $labelLeft
+    $lblLoadHint.Top = $topStart + ($rowHeight * 8)
+    $lblLoadHint.Width = 650
+    $lblLoadHint.Height = 40
+    $lblLoadHint.ForeColor = [System.Drawing.Color]::Gray
+    $tabLoad.Controls.Add($lblLoadHint)
+
     $btnTop = 378
     $btnAll = New-Object System.Windows.Forms.Button
     $btnAll.Text = "Выполнить всё"
-    $btnAll.Left = 15; $btnAll.Top = $btnTop; $btnAll.Width = 130; $btnAll.Height = 30
+    $btnAll.Left = 15; $btnAll.Top = $btnTop; $btnAll.Width = 108; $btnAll.Height = 30
     $btnAll.Anchor = "Top,Left"
     $form.Controls.Add($btnAll)
 
     $btnConfig = New-Object System.Windows.Forms.Button
     $btnConfig.Text = "Конфигурация"
-    $btnConfig.Left = 150; $btnConfig.Top = $btnTop; $btnConfig.Width = 115; $btnConfig.Height = 30
+    $btnConfig.Left = 127; $btnConfig.Top = $btnTop; $btnConfig.Width = 100; $btnConfig.Height = 30
     $form.Controls.Add($btnConfig)
 
     $btnExt = New-Object System.Windows.Forms.Button
     $btnExt.Text = "Расширения"
-    $btnExt.Left = 270; $btnExt.Top = $btnTop; $btnExt.Width = 110; $btnExt.Height = 30
+    $btnExt.Left = 231; $btnExt.Top = $btnTop; $btnExt.Width = 95; $btnExt.Height = 30
     $form.Controls.Add($btnExt)
 
     $btnGit = New-Object System.Windows.Forms.Button
     $btnGit.Text = "Синхронизация Git"
-    $btnGit.Left = 385; $btnGit.Top = $btnTop; $btnGit.Width = 145; $btnGit.Height = 30
+    $btnGit.Left = 330; $btnGit.Top = $btnTop; $btnGit.Width = 125; $btnGit.Height = 30
     $form.Controls.Add($btnGit)
+
+    $btnLoad = New-Object System.Windows.Forms.Button
+    $btnLoad.Text = "Загрузить в 1С"
+    $btnLoad.Left = 459; $btnLoad.Top = $btnTop; $btnLoad.Width = 125; $btnLoad.Height = 30
+    $form.Controls.Add($btnLoad)
 
     $btnCancelOp = New-Object System.Windows.Forms.Button
     $btnCancelOp.Text = "Отмена"
@@ -962,6 +1035,11 @@ function Show-SettingsForm {
         RbDumpAuto    = $rbDumpAuto
         RbDumpFull    = $rbDumpFull
         RbDumpInc     = $rbDumpInc
+        ChkLoadMain   = $chkLoadMain
+        ChkLoadExt    = $chkLoadExt
+        ChkLoadManual = $chkLoadManual
+        ChkUpdateDB   = $chkUpdateDB
+        ChkDynamic    = $chkDynamic
     }
 
     $script:ProgressForm         = $form
@@ -971,12 +1049,13 @@ function Show-SettingsForm {
     $script:ProgressCancelButton = $btnCancelOp
     $script:TimingBox            = $txtTiming
     $script:MainTabs             = $tabs
-    $script:ActionButtons        = @($btnAll, $btnConfig, $btnExt, $btnGit, $btnCleanClone)
+    $script:ActionButtons        = @($btnAll, $btnConfig, $btnExt, $btnGit, $btnLoad, $btnCleanClone)
 
     $btnAll.Add_Click({ Start-UiAction -Action "all" })
     $btnConfig.Add_Click({ Start-UiAction -Action "config" })
     $btnExt.Add_Click({ Start-UiAction -Action "extensions" })
     $btnGit.Add_Click({ Start-UiAction -Action "git" })
+    $btnLoad.Add_Click({ Start-UiAction -Action "load" })
     $btnCleanClone.Add_Click({ Start-UiAction -Action "reclone" })
 
     $form.Add_FormClosing({
@@ -1045,6 +1124,11 @@ function Read-UiConfig {
         SelectExtensionsManually = [bool]$ui.ChkManual.Checked
         ExtensionExcludePrefix   = $ui.TbPrefix.Text.Trim()
         DumpMode                 = $dumpMode
+        LoadMainConfig           = [bool]$ui.ChkLoadMain.Checked
+        LoadExtensions           = [bool]$ui.ChkLoadExt.Checked
+        LoadSelectExtensionsManually = [bool]$ui.ChkLoadManual.Checked
+        UpdateInfobaseCfg        = [bool]$ui.ChkUpdateDB.Checked
+        DynamicUpdateCfg         = [bool]$ui.ChkDynamic.Checked
     }
 }
 
@@ -1063,6 +1147,11 @@ function Save-AppConfig {
         SelectExtensionsManually = $Config.SelectExtensionsManually
         ExtensionExcludePrefix   = $Config.ExtensionExcludePrefix
         DumpMode                 = $Config.DumpMode
+        LoadMainConfig           = $Config.LoadMainConfig
+        LoadExtensions           = $Config.LoadExtensions
+        LoadSelectExtensionsManually = $Config.LoadSelectExtensionsManually
+        UpdateInfobaseCfg        = $Config.UpdateInfobaseCfg
+        DynamicUpdateCfg         = $Config.DynamicUpdateCfg
     }
     $saved | ConvertTo-Json | Set-Content -Path $ConfigPath -Encoding UTF8
 }
@@ -1112,6 +1201,24 @@ function Start-UiAction {
         if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { return }
     }
 
+    if ($Action -eq "load") {
+        $parts = @()
+        if ($cfg.LoadMainConfig) { $parts += "основную конфигурацию" }
+        if ($cfg.LoadExtensions) { $parts += "расширения" }
+        $what = ($parts -join " и ")
+        $upd = "нет"
+        if ($cfg.UpdateInfobaseCfg) {
+            if ($cfg.DynamicUpdateCfg) { $upd = "да, динамическое" }
+            else { $upd = "да, монопольное" }
+        }
+        $answer = [System.Windows.Forms.MessageBox]::Show(
+            "В базу $($cfg.InfobasePath) будет загружена $what из origin/$($cfg.GitBranch).`r`n`r`nКонфигурация в 1С будет заменена.`r`nЛокальные файлы выгрузки будут приведены к удалённой ветке.`r`nОбновление конфигурации БД: $upd`r`n`r`nПродолжить?",
+            "Загрузка в 1С",
+            [System.Windows.Forms.MessageBoxButtons]::YesNo,
+            [System.Windows.Forms.MessageBoxIcon]::Warning)
+        if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+    }
+
     Save-AppConfig -Config $cfg
     Set-MainFormBusy -Busy $true
     try {
@@ -1148,8 +1255,8 @@ function Test-Config {
     $action = [string]$Config.Action
     if (-not $action) { $action = "all" }
 
-    $need1C = $action -in @("all", "config", "extensions")
-    $needGit = $action -in @("all", "git", "reclone")
+    $need1C = $action -in @("all", "config", "extensions", "load")
+    $needGit = $action -in @("all", "git", "reclone", "load")
 
     if ($need1C) {
         if (-not $Config.PlatformPath) {
@@ -1184,8 +1291,12 @@ function Test-Config {
         $errors += "Для «Выполнить всё» отметьте основную конфигурацию и/или расширения на вкладке «Выгрузка»"
     }
 
+    if ($action -eq "load" -and -not $Config.LoadMainConfig -and -not $Config.LoadExtensions) {
+        $errors += "Для загрузки в 1С отметьте основную конфигурацию и/или расширения на вкладке «Загрузка»"
+    }
+
     $gitUrl = [string]$Config.GitRepoUrl
-    if ($needGit -or ($gitUrl -and $action -in @("config", "extensions"))) {
+    if ($needGit -or ($gitUrl -and $action -in @("config", "extensions", "load"))) {
         if (-not $gitUrl) {
             $errors += "Не указан URL Git-репозитория"
         }
@@ -1219,7 +1330,9 @@ function Test-NameHasPrefix {
 function Show-ExtensionPicker {
     param(
         [string[]]$Extensions,
-        [string]$ExcludePrefix
+        [string]$ExcludePrefix,
+        [string]$PromptText = "Отметьте расширения для выгрузки:",
+        [string]$AcceptText = "Выгрузить выбранные"
     )
 
     $form = New-Object System.Windows.Forms.Form
@@ -1233,7 +1346,7 @@ function Show-ExtensionPicker {
     $form.Font = New-Object System.Drawing.Font("Segoe UI", 9)
 
     $lbl = New-Object System.Windows.Forms.Label
-    $lbl.Text = "Отметьте расширения для выгрузки:"
+    $lbl.Text = $PromptText
     $lbl.Left = 15; $lbl.Top = 15; $lbl.Width = 470
     $form.Controls.Add($lbl)
 
@@ -1251,7 +1364,7 @@ function Show-ExtensionPicker {
     $state = @{ Action = "skip" }
 
     $btnDump = New-Object System.Windows.Forms.Button
-    $btnDump.Text = "Выгрузить выбранные"
+    $btnDump.Text = $AcceptText
     $btnDump.Left = 15; $btnDump.Top = 390; $btnDump.Width = 180
     $btnDump.Add_Click({
         if ($list.CheckedItems.Count -eq 0) {
@@ -1422,7 +1535,8 @@ function Format-TimingSummary {
     param(
         $ConfigTiming,
         $ExtensionsTiming,
-        $GitTiming
+        $GitTiming,
+        [string]$Kind = "Dump"
     )
 
     $fmt = {
@@ -1430,10 +1544,19 @@ function Format-TimingSummary {
         if ($timing) { Format-ElapsedTime -Elapsed $timing.Elapsed } else { "не выполнялась" }
     }
 
+    $cfgLabel = "Выгрузка конфигурации"
+    $extLabel = "Выгрузка расширений"
+    $gitLabel = "Синхронизация с Git"
+    if ($Kind -eq "Load") {
+        $cfgLabel = "Загрузка конфигурации"
+        $extLabel = "Загрузка расширений"
+        $gitLabel = "Получение из Git"
+    }
+
     $lines = New-Object System.Collections.Generic.List[string]
-    $lines.Add("Выгрузка конфигурации: $( & $fmt $ConfigTiming )")
-    $lines.Add("Выгрузка расширений: $( & $fmt $ExtensionsTiming )")
-    $lines.Add("Синхронизация с Git: $( & $fmt $GitTiming )")
+    $lines.Add("${cfgLabel}: $( & $fmt $ConfigTiming )")
+    $lines.Add("${extLabel}: $( & $fmt $ExtensionsTiming )")
+    $lines.Add("${gitLabel}: $( & $fmt $GitTiming )")
 
     $performed = New-Object System.Collections.Generic.List[object]
     if ($ConfigTiming) { [void]$performed.Add($ConfigTiming) }
@@ -1687,6 +1810,38 @@ function Initialize-GitRepository {
     else {
         Write-Log "Удалённая ветка '$Branch' ещё не создана — первый push её опубликует"
     }
+}
+
+function Sync-GitWorktreeToOrigin {
+    param(
+        [string]$GitExe,
+        [string]$RepoDir,
+        [string]$Branch
+    )
+
+    if (-not $Branch) { $Branch = "main" }
+    Test-Cancelled
+    Set-Status -Text "Получение файлов из origin/$Branch..." -Percent 32
+    Write-Log "Сбрасываем локальную копию к origin/$Branch"
+
+    Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir -GitArgs @("fetch", "origin")
+    $hasRemote = Test-GitRemoteBranchExists -GitExe $GitExe -RepoDir $RepoDir -Branch $Branch
+    if (-not $hasRemote) {
+        throw "На origin нет ветки '$Branch'. Нечего загружать в 1С."
+    }
+
+    $co = Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
+        -GitArgs @("checkout", $Branch) -IgnoreExitCode
+    if ($co.ExitCode -ne 0) {
+        Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
+            -GitArgs @("checkout", "-B", $Branch, "origin/$Branch")
+    }
+
+    Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
+        -GitArgs @("reset", "--hard", "origin/$Branch")
+    Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
+        -GitArgs @("clean", "-fd") -IgnoreExitCode | Out-Null
+    Write-Log "Рабочее дерево совпадает с origin/$Branch"
 }
 
 # === ПУБЛИКАЦИЯ В GIT ===
@@ -2148,7 +2303,7 @@ function Invoke-1CDesigner {
         if (-not $hint) {
             $hint = "Конфигуратор завершился с кодом $exitCode без текста ошибки. Закройте базу в 1С (пользовательский режим и конфигуратор) и проверьте имя пользователя и пароль."
         }
-        throw "Выгрузка не удалась (код $exitCode). $hint"
+        throw "Операция конфигуратора не удалась (код $exitCode). $hint"
     }
 
     return [PSCustomObject]@{
@@ -2270,6 +2425,157 @@ function Invoke-1CExport {
     }
 
     Write-Log "Выгрузка завершена: $OutputPath"
+}
+
+function Get-RepoExtensionNames {
+    param([string]$RepoDir)
+    $root = Join-Path $RepoDir "Extensions"
+    $names = @()
+    if (-not (Test-Path -LiteralPath $root)) { return ,$names }
+    $dirs = Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue
+    foreach ($dir in $dirs) {
+        if (Test-Path -LiteralPath (Join-Path $dir.FullName "Configuration.xml")) {
+            $names += $dir.Name
+        }
+    }
+    return ,$names
+}
+
+function Invoke-1CLoad {
+    param(
+        [string]$Platform,
+        [string]$DBType,
+        [string]$BasePath,
+        [string]$User,
+        [string]$Password,
+        [string]$InputPath,
+        [string]$Extension = $null,
+        [bool]$UpdateDB = $true,
+        [bool]$Dynamic = $false,
+        [int]$ProgressFrom = 50
+    )
+
+    Test-Cancelled
+    if (-not (Test-DumpCatalogReady -Path $InputPath)) {
+        $where = $InputPath
+        if ($Extension) { $where = "$InputPath (расширение $Extension)" }
+        throw "Нет Configuration.xml для загрузки: $where"
+    }
+
+    $title = "Загрузка основной конфигурации в 1С"
+    if ($Extension) { $title = "Загрузка расширения в 1С: $Extension" }
+
+    $useUpdate = Test-Path -LiteralPath (Join-Path $InputPath "ConfigDumpInfo.xml")
+    $attemptedUpdate = $useUpdate
+    $done = $false
+
+    while (-not $done) {
+        Test-Cancelled
+        $short = Enter-ShortDumpPath -TargetPath $InputPath
+        $dumpArg = $short.DumpPath
+        if ($dumpArg -match '\s') { $dumpArg = "`"$dumpArg`"" }
+
+        $ConnParams = Get-1CConnectionParams -DBType $DBType -BasePath $BasePath
+        $ArgLine = "DESIGNER $ConnParams /N `"$User`" /P `"$Password`" /LoadConfigFromFiles $dumpArg"
+        if ($useUpdate) { $ArgLine += " -update" }
+        if ($Extension) { $ArgLine += " -Extension `"$Extension`"" }
+        $ArgLine += " -Format Hierarchical"
+        if ($UpdateDB) {
+            $ArgLine += " /UpdateDBCfg"
+            if ($Dynamic) { $ArgLine += " -Dynamic+" }
+            else { $ArgLine += " -Dynamic-" }
+            if ($Extension) { $ArgLine += " -Extension `"$Extension`"" }
+        }
+
+        Write-Log $title
+        if ($useUpdate) { Write-Log "Режим загрузки: инкрементальная (-update)" }
+        else { Write-Log "Режим загрузки: полная" }
+        Set-Status -Text "$title..." -Percent $ProgressFrom
+        Start-DumpWatch -Path $short.DumpPath -Title $title
+
+        try {
+            Invoke-1CDesigner -Platform $Platform -ArgumentString $ArgLine | Out-Null
+            $done = $true
+        }
+        catch [System.OperationCanceledException] {
+            throw
+        }
+        catch {
+            if ($useUpdate) {
+                Write-Log "Инкрементальная загрузка не удалась: $_"
+                Write-Log "Повторяем как полную загрузку"
+                $useUpdate = $false
+            }
+            else {
+                throw
+            }
+        }
+        finally {
+            Stop-DumpWatch
+            Exit-ShortDumpPath -Info $short
+        }
+
+        if (-not $done -and -not $useUpdate -and $attemptedUpdate) {
+            $attemptedUpdate = $false
+        }
+    }
+
+    Write-Log "Загрузка завершена: $InputPath"
+}
+
+function Invoke-LoadExtensionsPipeline {
+    param(
+        [string]$Platform,
+        [string]$DBType,
+        [string]$BasePath,
+        [string]$User,
+        [string]$Password,
+        [string]$RepoDir,
+        [bool]$SelectManually,
+        [string]$ExcludePrefix,
+        [bool]$UpdateDB,
+        [bool]$Dynamic
+    )
+
+    $AllExtensions = @(Get-RepoExtensionNames -RepoDir $RepoDir)
+    if ($AllExtensions.Count -eq 0) {
+        Write-Log "В Git нет расширений с Configuration.xml (папка Extensions)"
+        return
+    }
+
+    $ExtensionsToLoad = @()
+    if ($SelectManually) {
+        Set-ProgressCancelEnabled -Enabled $false
+        $ExtensionsToLoad = Show-ExtensionPicker -Extensions $AllExtensions -ExcludePrefix $ExcludePrefix `
+            -PromptText "Отметьте расширения для загрузки в 1С:" -AcceptText "Загрузить выбранные"
+        Set-ProgressCancelEnabled -Enabled $true
+        Test-Cancelled
+        if ($ExtensionsToLoad.Count -eq 0) {
+            Write-Log "Загрузка расширений пропущена пользователем"
+            return
+        }
+    }
+    else {
+        $ExtensionsToLoad = @($AllExtensions | Where-Object {
+            -not (Test-NameHasPrefix -Name $_ -Prefix $ExcludePrefix)
+        })
+        if ($ExtensionsToLoad.Count -eq 0) {
+            Write-Log "После фильтра по префиксу '$ExcludePrefix' расширений не осталось"
+            return
+        }
+    }
+
+    $Total = $ExtensionsToLoad.Count
+    $Index = 0
+    foreach ($ExtName in $ExtensionsToLoad) {
+        $Index++
+        $PercentFrom = 70 + [int](($Index - 1) / $Total * 20)
+        $ExtPath = Join-Path $RepoDir "Extensions\$ExtName"
+        Invoke-1CLoad -Platform $Platform -DBType $DBType -BasePath $BasePath `
+            -User $User -Password $Password -InputPath $ExtPath `
+            -Extension $ExtName -UpdateDB $UpdateDB -Dynamic $Dynamic `
+            -ProgressFrom $PercentFrom
+    }
 }
 
 # === ПОЛУЧЕНИЕ СПИСКА РАСШИРЕНИЙ ===
@@ -2438,6 +2744,58 @@ function Invoke-SyncPipeline {
         Set-Status -Text "Чистый клон готов" -Percent 100
         Write-Log "Операция успешно завершена"
         Set-TimingSummaryText -Text ("Чистый клон готов.`r`nРепозиторий: {0}`r`nОкончание: {1}" -f $GitRepoUrl, (Format-DateTimeStamp -Value (Get-Date)))
+        return
+    }
+
+    if ($Action -eq "load") {
+        $LoadMainConfig = [bool]$Config.LoadMainConfig
+        $LoadExtensionsFlag = [bool]$Config.LoadExtensions
+        $LoadSelectManually = [bool]$Config.LoadSelectExtensionsManually
+        $UpdateInfobaseCfg = [bool]$Config.UpdateInfobaseCfg
+        $DynamicUpdateCfg = [bool]$Config.DynamicUpdateCfg
+
+        Write-Log "Загрузка конфигурации: $LoadMainConfig; расширения: $LoadExtensionsFlag; UpdateDBCfg: $UpdateInfobaseCfg; Dynamic: $DynamicUpdateCfg"
+
+        $gitPrepStart = Get-Date
+        $EmbeddedGit = Join-Path $AppDir "PortableGit-64-bit.7z.exe"
+        Initialize-PortableGit -EmbeddedArchive $EmbeddedGit
+        Initialize-GitIdentity -GitExe $GitExe -GitHome $GitHome
+        Initialize-GitRepository -GitExe $GitExe -RepoDir $GitRepo `
+            -RemoteUrl $GitRepoUrl -Branch $GitBranch -GitHome $GitHome -SkipPullIfDirty
+        Sync-GitWorktreeToOrigin -GitExe $GitExe -RepoDir $GitRepo -Branch $GitBranch
+        $gitTiming = New-OpTiming -StartedAt $gitPrepStart -EndedAt (Get-Date)
+        Write-Log ("Получение из Git: {0}" -f (Format-ElapsedTime -Elapsed $gitTiming.Elapsed))
+
+        if ($LoadMainConfig) {
+            $opStart = Get-Date
+            Invoke-1CLoad -Platform $PlatformPath -DBType $DBType -BasePath $InfobasePath `
+                -User $1CUser -Password $1CPassword -InputPath $ConfigExportPath `
+                -UpdateDB $UpdateInfobaseCfg -Dynamic $DynamicUpdateCfg -ProgressFrom 50
+            $configTiming = New-OpTiming -StartedAt $opStart -EndedAt (Get-Date)
+            Write-Log ("Загрузка конфигурации: {0}" -f (Format-ElapsedTime -Elapsed $configTiming.Elapsed))
+        }
+
+        if ($LoadExtensionsFlag) {
+            $opStart = Get-Date
+            Invoke-LoadExtensionsPipeline -Platform $PlatformPath -DBType $DBType `
+                -BasePath $InfobasePath -User $1CUser -Password $1CPassword `
+                -RepoDir $GitRepo -SelectManually $LoadSelectManually `
+                -ExcludePrefix $ExtensionExcludePrefix `
+                -UpdateDB $UpdateInfobaseCfg -Dynamic $DynamicUpdateCfg
+            $extTiming = New-OpTiming -StartedAt $opStart -EndedAt (Get-Date)
+            Write-Log ("Загрузка расширений: {0}" -f (Format-ElapsedTime -Elapsed $extTiming.Elapsed))
+        }
+
+        Set-Status -Text "Загрузка в 1С завершена" -Percent 100
+        Write-Log "Операция успешно завершена"
+
+        $doneMessage = "Загрузка из Git в базу '$InfobasePath' завершена."
+        $timingText = Format-TimingSummary -ConfigTiming $configTiming `
+            -ExtensionsTiming $extTiming -GitTiming $gitTiming -Kind "Load"
+        foreach ($timingLine in ($timingText -split "`r`n")) {
+            if ($timingLine) { Write-Log $timingLine }
+        }
+        Set-TimingSummaryText -Text ($doneMessage + "`r`n`r`n" + $timingText)
         return
     }
 
