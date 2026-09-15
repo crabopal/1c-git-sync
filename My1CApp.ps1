@@ -507,6 +507,141 @@ function Find-Latest1CPlatform {
     return $Sorted[0].Path
 }
 
+function Get-DefaultIBasesV8iPaths {
+    $paths = @(
+        (Join-Path $env:APPDATA "1C\1CEStart\ibases.v8i"),
+        (Join-Path $env:APPDATA "1C\1cv8\ibases.v8i"),
+        (Join-Path $env:ProgramData "1C\1CEStart\ibases.v8i")
+    )
+    if ($env:USERPROFILE) {
+        $paths += (Join-Path $env:USERPROFILE "AppData\Roaming\1C\1CEStart\ibases.v8i")
+    }
+    return @($paths | Where-Object { $_ } | Select-Object -Unique)
+}
+
+function Read-IBasesV8iText {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return "" }
+    $bytes = [System.IO.File]::ReadAllBytes($Path)
+    if ($bytes.Length -eq 0) { return "" }
+    if ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFF -and $bytes[1] -eq 0xFE) {
+        return [System.Text.Encoding]::Unicode.GetString($bytes, 2, $bytes.Length - 2)
+    }
+    if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+        return [System.Text.Encoding]::UTF8.GetString($bytes, 3, $bytes.Length - 3)
+    }
+    $probe = [Math]::Min(120, $bytes.Length)
+    $zeros = 0
+    for ($i = 0; $i -lt $probe; $i++) {
+        if ($bytes[$i] -eq 0) { $zeros++ }
+    }
+    if ($zeros -gt 20) {
+        return [System.Text.Encoding]::Unicode.GetString($bytes)
+    }
+    return [System.Text.Encoding]::GetEncoding(1251).GetString($bytes)
+}
+
+function Get-IBasesConnectValue {
+    param([string]$Connect, [string]$Key)
+    $patternQuoted = '(?i)(?:^|;)\s*' + [regex]::Escape($Key) + '\s*=\s*"([^"]*)"'
+    if ($Connect -match $patternQuoted) { return $Matches[1].Trim() }
+    $patternSingle = '(?i)(?:^|;)\s*' + [regex]::Escape($Key) + "\s*=\s*'([^']*)'"
+    if ($Connect -match $patternSingle) { return $Matches[1].Trim() }
+    $patternBare = '(?i)(?:^|;)\s*' + [regex]::Escape($Key) + '\s*=\s*([^;]+)'
+    if ($Connect -match $patternBare) { return $Matches[1].Trim().Trim('"').Trim("'") }
+    return ""
+}
+
+function ConvertFrom-IBasesConnect {
+    param([string]$Name, [string]$Connect)
+    if (-not $Connect) { return $null }
+    $c = $Connect.Trim()
+    if ($c -match '(?i)(?:^|;)\s*ws\s*=') { return $null }
+
+    $filePath = Get-IBasesConnectValue -Connect $c -Key "File"
+    if ($filePath) {
+        return [PSCustomObject]@{
+            Title    = $Name
+            Kind     = "File"
+            FilePath = $filePath
+            Server   = ""
+            Ref      = ""
+        }
+    }
+
+    $srvr = Get-IBasesConnectValue -Connect $c -Key "Srvr"
+    $ref = Get-IBasesConnectValue -Connect $c -Key "Ref"
+
+    if ($srvr -and $ref) {
+        return [PSCustomObject]@{
+            Title    = $Name
+            Kind     = "Server"
+            FilePath = ""
+            Server   = $srvr
+            Ref      = $ref
+        }
+    }
+    return $null
+}
+
+function Read-IBasesV8iFile {
+    param([string]$Path)
+    $bases = New-Object System.Collections.Generic.List[object]
+    $text = Read-IBasesV8iText -Path $Path
+    if (-not $text) { return }
+
+    $name = $null
+    $connect = ""
+
+    foreach ($raw in ($text -split "`r?`n")) {
+        $line = $raw.Trim()
+        if ($line -match '^\[(.*)\]$') {
+            if ($name -and $connect) {
+                $item = ConvertFrom-IBasesConnect -Name $name -Connect $connect
+                if ($item) { [void]$bases.Add($item) }
+            }
+            $name = $Matches[1].Trim()
+            $connect = ""
+            continue
+        }
+        if ($line -match '^(?i)Connect\s*=\s*(.*)$') {
+            $connect = $Matches[1].Trim()
+        }
+    }
+    if ($name -and $connect) {
+        $item = ConvertFrom-IBasesConnect -Name $name -Connect $connect
+        if ($item) { [void]$bases.Add($item) }
+    }
+    foreach ($b in $bases) { $b }
+}
+
+function Get-1CIbasesList {
+    param([string[]]$ExtraFiles = @())
+    $files = New-Object System.Collections.Generic.List[string]
+    foreach ($p in (Get-DefaultIBasesV8iPaths)) {
+        if ($p -and (Test-Path -LiteralPath $p)) { [void]$files.Add($p) }
+    }
+    foreach ($p in @($ExtraFiles)) {
+        if ($p -and (Test-Path -LiteralPath $p) -and -not $files.Contains($p)) { [void]$files.Add($p) }
+    }
+
+    $result = New-Object System.Collections.Generic.List[object]
+    $seen = @{}
+    foreach ($file in $files) {
+        foreach ($item in @(Read-IBasesV8iFile -Path $file)) {
+            $key = "$($item.Kind)|$($item.FilePath)|$($item.Server)|$($item.Ref)"
+            if ($seen.ContainsKey($key.ToLowerInvariant())) { continue }
+            $seen[$key.ToLowerInvariant()] = $true
+            $suffix = "файловая"
+            if ($item.Kind -eq "Server") { $suffix = "$($item.Server)\$($item.Ref)" }
+            else { $suffix = $item.FilePath }
+            $item.Title = "$($item.Title)  [$suffix]"
+            [void]$result.Add($item)
+        }
+    }
+    foreach ($b in $result) { $b }
+}
+
 # === ОКНО ПРОГРЕССА ===
 function Show-ProgressForm {
     $script:CancelRequested = $false
@@ -615,7 +750,7 @@ function Show-SettingsForm {
 
     $tabs = New-Object System.Windows.Forms.TabControl
     $tabs.Left = 10; $tabs.Top = 10
-    $tabs.Width = 705; $tabs.Height = 360
+    $tabs.Width = 705; $tabs.Height = 380
     $tabs.Anchor = "Top,Left,Right"
     $form.Controls.Add($tabs)
 
@@ -665,17 +800,34 @@ function Show-SettingsForm {
     })
     $tab1C.Controls.Add($btnBrowsePlatform)
 
-    [void](Add-FormLabel -Parent $tab1C -Text "Тип базы:" -Left $labelLeft -Top ($topStart + $rowHeight + 3))
+    [void](Add-FormLabel -Parent $tab1C -Text "База из списка:" -Left $labelLeft -Top ($topStart + $rowHeight + 3))
+    $cbIBases = New-Object System.Windows.Forms.ComboBox
+    $cbIBases.Left = $fieldLeft
+    $cbIBases.Top = $topStart + $rowHeight
+    $cbIBases.Width = $fieldWidth
+    $cbIBases.DropDownStyle = "DropDownList"
+    $cbIBases.DropDownWidth = 620
+    $tab1C.Controls.Add($cbIBases)
+
+    $btnBrowseV8i = New-Object System.Windows.Forms.Button
+    $btnBrowseV8i.Text = "Список..."
+    $btnBrowseV8i.Left = $browseLeft
+    $btnBrowseV8i.Top = $topStart + $rowHeight
+    $btnBrowseV8i.Width = $browseWidth
+    $btnBrowseV8i.Height = 22
+    $tab1C.Controls.Add($btnBrowseV8i)
+
+    [void](Add-FormLabel -Parent $tab1C -Text "Тип базы:" -Left $labelLeft -Top ($topStart + ($rowHeight * 2) + 3))
 
     $rbFile = New-Object System.Windows.Forms.RadioButton
     $rbFile.Text = "Файловая"
-    $rbFile.Left = $fieldLeft; $rbFile.Top = $topStart + $rowHeight
+    $rbFile.Left = $fieldLeft; $rbFile.Top = $topStart + ($rowHeight * 2)
     $rbFile.Width = 100
     $tab1C.Controls.Add($rbFile)
 
     $rbServer = New-Object System.Windows.Forms.RadioButton
     $rbServer.Text = "Клиент-серверная"
-    $rbServer.Left = $fieldLeft + 110; $rbServer.Top = $topStart + $rowHeight
+    $rbServer.Left = $fieldLeft + 110; $rbServer.Top = $topStart + ($rowHeight * 2)
     $rbServer.Width = 160
     $tab1C.Controls.Add($rbServer)
 
@@ -684,14 +836,14 @@ function Show-SettingsForm {
     elseif ($Existing.InfobasePath -and $Existing.InfobasePath -notmatch '^[a-zA-Z]:\\') { $IsServer = $true }
     if ($IsServer) { $rbServer.Checked = $true } else { $rbFile.Checked = $true }
 
-    $lbl2 = Add-FormLabel -Parent $tab1C -Text "Каталог информационной базы:" -Left $labelLeft -Top ($topStart + ($rowHeight * 2) + 3)
+    $lbl2 = Add-FormLabel -Parent $tab1C -Text "Каталог информационной базы:" -Left $labelLeft -Top ($topStart + ($rowHeight * 3) + 3)
     $fileBaseValue = ""
     if (-not $IsServer) { $fileBaseValue = [string]$Existing.InfobasePath }
-    $tbFileBase = Add-FormTextBox -Parent $tab1C -Left $fieldLeft -Top ($topStart + ($rowHeight * 2)) -Width $fieldWidth -Value $fileBaseValue
+    $tbFileBase = Add-FormTextBox -Parent $tab1C -Left $fieldLeft -Top ($topStart + ($rowHeight * 3)) -Width $fieldWidth -Value $fileBaseValue
 
     $btnBrowseBase = New-Object System.Windows.Forms.Button
     $btnBrowseBase.Text = "Обзор..."
-    $btnBrowseBase.Left = $browseLeft; $btnBrowseBase.Top = $topStart + ($rowHeight * 2)
+    $btnBrowseBase.Left = $browseLeft; $btnBrowseBase.Top = $topStart + ($rowHeight * 3)
     $btnBrowseBase.Width = $browseWidth; $btnBrowseBase.Height = 22
     $btnBrowseBase.Add_Click({
         $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
@@ -705,7 +857,7 @@ function Show-SettingsForm {
     })
     $tab1C.Controls.Add($btnBrowseBase)
 
-    $lbl3 = Add-FormLabel -Parent $tab1C -Text "Кластер серверов:" -Left $labelLeft -Top ($topStart + ($rowHeight * 3) + 3)
+    $lbl3 = Add-FormLabel -Parent $tab1C -Text "Кластер серверов:" -Left $labelLeft -Top ($topStart + ($rowHeight * 4) + 3)
     $serverHostValue = ""
     $serverBaseValue = ""
     if ($IsServer -and $Existing.InfobasePath) {
@@ -713,24 +865,24 @@ function Show-SettingsForm {
         if ($parts.Count -ge 1) { $serverHostValue = $parts[0] }
         if ($parts.Count -ge 2) { $serverBaseValue = $parts[1] }
     }
-    $tbServerHost = Add-FormTextBox -Parent $tab1C -Left $fieldLeft -Top ($topStart + ($rowHeight * 3)) -Width ($fieldWidth + $browseWidth + 10) -Value $serverHostValue
+    $tbServerHost = Add-FormTextBox -Parent $tab1C -Left $fieldLeft -Top ($topStart + ($rowHeight * 4)) -Width ($fieldWidth + $browseWidth + 10) -Value $serverHostValue
 
-    $lbl4 = Add-FormLabel -Parent $tab1C -Text "Имя информационной базы:" -Left $labelLeft -Top ($topStart + ($rowHeight * 4) + 3)
-    $tbServerBase = Add-FormTextBox -Parent $tab1C -Left $fieldLeft -Top ($topStart + ($rowHeight * 4)) -Width ($fieldWidth + $browseWidth + 10) -Value $serverBaseValue
+    $lbl4 = Add-FormLabel -Parent $tab1C -Text "Имя информационной базы:" -Left $labelLeft -Top ($topStart + ($rowHeight * 5) + 3)
+    $tbServerBase = Add-FormTextBox -Parent $tab1C -Left $fieldLeft -Top ($topStart + ($rowHeight * 5)) -Width ($fieldWidth + $browseWidth + 10) -Value $serverBaseValue
 
-    [void](Add-FormLabel -Parent $tab1C -Text "Пользователь 1С:" -Left $labelLeft -Top ($topStart + ($rowHeight * 5) + 3))
+    [void](Add-FormLabel -Parent $tab1C -Text "Пользователь 1С:" -Left $labelLeft -Top ($topStart + ($rowHeight * 6) + 3))
     $userValue = "Admin"
     if ($Existing.User) { $userValue = $Existing.User }
-    $tbUser = Add-FormTextBox -Parent $tab1C -Left $fieldLeft -Top ($topStart + ($rowHeight * 5)) -Width ($fieldWidth + $browseWidth + 10) -Value $userValue
+    $tbUser = Add-FormTextBox -Parent $tab1C -Left $fieldLeft -Top ($topStart + ($rowHeight * 6)) -Width ($fieldWidth + $browseWidth + 10) -Value $userValue
 
-    [void](Add-FormLabel -Parent $tab1C -Text "Пароль 1С:" -Left $labelLeft -Top ($topStart + ($rowHeight * 6) + 3))
-    $tbPass = Add-FormTextBox -Parent $tab1C -Left $fieldLeft -Top ($topStart + ($rowHeight * 6)) -Width ($fieldWidth + $browseWidth + 10)
+    [void](Add-FormLabel -Parent $tab1C -Text "Пароль 1С:" -Left $labelLeft -Top ($topStart + ($rowHeight * 7) + 3))
+    $tbPass = Add-FormTextBox -Parent $tab1C -Left $fieldLeft -Top ($topStart + ($rowHeight * 7)) -Width ($fieldWidth + $browseWidth + 10)
     $tbPass.UseSystemPasswordChar = $true
 
     $chkShow = New-Object System.Windows.Forms.CheckBox
     $chkShow.Text = "Показать пароль 1С"
     $chkShow.Left = $fieldLeft
-    $chkShow.Top = $topStart + ($rowHeight * 7) - 2
+    $chkShow.Top = $topStart + ($rowHeight * 8) - 2
     $chkShow.Width = 220
     $chkShow.Add_CheckedChanged({ $tbPass.UseSystemPasswordChar = -not $chkShow.Checked })
     $tab1C.Controls.Add($chkShow)
@@ -750,6 +902,80 @@ function Show-SettingsForm {
     $rbFile.Add_CheckedChanged($UpdateVisibility)
     $rbServer.Add_CheckedChanged($UpdateVisibility)
     & $UpdateVisibility
+
+    $script:IBaseComboItems = @()
+    $script:IBasesExtraFile = $null
+    $script:IBasesUpdating = $false
+
+    $FillIBaseCombo = {
+        param([string]$ExtraFile, [string]$SelectPath)
+        $script:IBasesUpdating = $true
+        $extra = @()
+        if ($ExtraFile) { $extra = @($ExtraFile) }
+        $bases = @(Get-1CIbasesList -ExtraFiles $extra)
+        $script:IBaseComboItems = $bases
+        $cbIBases.Items.Clear()
+        if ($bases.Count -eq 0) {
+            [void]$cbIBases.Items.Add("(список ibases.v8i не найден или пуст)")
+        }
+        else {
+            [void]$cbIBases.Items.Add("(выберите базу из ibases.v8i)")
+        }
+        $selectIndex = 0
+        $idx = 1
+        foreach ($b in $bases) {
+            [void]$cbIBases.Items.Add($b.Title)
+            if ($SelectPath) {
+                if ($b.Kind -eq "File" -and [string]::Equals($b.FilePath, $SelectPath, [StringComparison]::OrdinalIgnoreCase)) {
+                    $selectIndex = $idx
+                }
+                elseif ($b.Kind -eq "Server") {
+                    $full = "$($b.Server)\$($b.Ref)"
+                    if ([string]::Equals($full, $SelectPath, [StringComparison]::OrdinalIgnoreCase)) {
+                        $selectIndex = $idx
+                    }
+                }
+            }
+            $idx++
+        }
+        if ($cbIBases.Items.Count -gt 0) { $cbIBases.SelectedIndex = $selectIndex }
+        $script:IBasesUpdating = $false
+    }
+
+    $cbIBases.Add_SelectedIndexChanged({
+        if ($script:IBasesUpdating) { return }
+        $sel = $cbIBases.SelectedIndex
+        if ($sel -le 0) { return }
+        $item = $script:IBaseComboItems[$sel - 1]
+        if (-not $item) { return }
+        if ($item.Kind -eq "File") {
+            $tbFileBase.Text = $item.FilePath
+            $rbFile.Checked = $true
+        }
+        elseif ($item.Kind -eq "Server") {
+            $tbServerHost.Text = $item.Server
+            $tbServerBase.Text = $item.Ref
+            $rbServer.Checked = $true
+        }
+    })
+
+    $btnBrowseV8i.Add_Click({
+        $dlg = New-Object System.Windows.Forms.OpenFileDialog
+        $dlg.Filter = "Список баз 1С (ibases.v8i)|ibases.v8i;*.v8i|Все файлы (*.*)|*.*"
+        $dlg.Title = "Выберите ibases.v8i"
+        $dlg.FileName = "ibases.v8i"
+        $startDir = Join-Path $env:APPDATA "1C\1CEStart"
+        if (Test-Path $startDir) { $dlg.InitialDirectory = $startDir }
+        if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+            $script:IBasesExtraFile = $dlg.FileName
+            $currentPath = ""
+            if ($rbServer.Checked) { $currentPath = "$($tbServerHost.Text.Trim())\$($tbServerBase.Text.Trim())" }
+            else { $currentPath = $tbFileBase.Text.Trim() }
+            & $FillIBaseCombo $script:IBasesExtraFile $currentPath
+        }
+    })
+
+    & $FillIBaseCombo "" ([string]$Existing.InfobasePath)
 
     # --- Вкладка «Git» ---
     [void](Add-FormLabel -Parent $tabGit -Text "URL Git-репозитория:" -Left $labelLeft -Top ($topStart + 3))
