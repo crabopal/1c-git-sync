@@ -39,7 +39,7 @@ $GitRepo          = Join-Path $WorkDir "repo"
 $ConfigExportPath = Join-Path $GitRepo "Config"
 $ConfigPath       = Join-Path $WorkDir "config.json"
 $EmbeddedGit      = Join-Path $AppDir "PortableGit-64-bit.7z.exe"
-$AppVersion       = "1.3.0"
+$AppVersion       = "1.4.0"
 $AppGitHubRepo    = "crabopal/1c-git-sync"
 
 # === ГЛОБАЛЬНЫЙ КОНТЕКСТ ПРОГРЕССА ===
@@ -1171,7 +1171,7 @@ function Show-SettingsForm {
     $rbServer.Add_CheckedChanged($UpdateVisibility)
     & $UpdateVisibility
 
-    $authTop = $topStart + ($rowHeight * 2)
+    $authTop = $topStart + $rowHeight
     $lblUser = Add-FormLabel -Parent $tabSettings -Text "Пользователь 1С:" -Left $labelLeft -Top ($authTop + 3)
     $userValue = "Admin"
     if ($Existing.User) { $userValue = $Existing.User }
@@ -1236,27 +1236,21 @@ function Show-SettingsForm {
     $pnlGitExtra.Controls.Add($lblCleanClone)
 
     $RelayoutSettings = {
-        $y = $topStart + ($rowHeight * 2) - 4
+        $y = $chkAutoPush.Top + $chkAutoPush.Height + 12
+        $lnkConnExtra.Top = $y
+        $y += 22
+        $pnlConn.Top = $y
         if ($pnlConn.Visible) { $y += $pnlConn.Height + 8 }
-        $lblUser.Top = $y + 3
-        $tbUser.Top = $y
-        $y += $rowHeight
-        $lblPass.Top = $y + 3
-        $tbPass.Top = $y
-        $y += $rowHeight
-        $chkShow.Top = $y - 2
-        $y += $rowHeight + 8
-        $lblRepo.Top = $y + 3
-        $tbRepo.Top = $y
-        $y += $rowHeight
-        $lblBranch.Top = $y + 3
-        $tbBranch.Top = $y
-        $y += $rowHeight
-        $chkAutoPush.Top = $y + 4
-        $y += $rowHeight
-        $lnkGitExtra.Top = $y + 2
+        $lnkGitExtra.Top = $y
         $y += 24
         $pnlGitExtra.Top = $y
+        if ($pnlGitExtra.Visible) { $y += $pnlGitExtra.Height }
+        $tabSettings.AutoScrollMinSize = New-Object System.Drawing.Size(0, ($y + 24))
+        $pnlConn.SendToBack()
+        $pnlGitExtra.SendToBack()
+        foreach ($ctl in @($lblUser, $tbUser, $lblPass, $tbPass, $chkShow, $lblRepo, $tbRepo, $lblBranch, $tbBranch, $chkAutoPush)) {
+            $ctl.BringToFront()
+        }
     }
 
     $lnkConnExtra.Add_LinkClicked({
