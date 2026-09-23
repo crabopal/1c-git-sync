@@ -39,7 +39,7 @@ $GitRepo          = Join-Path $WorkDir "repo"
 $ConfigExportPath = Join-Path $GitRepo "Config"
 $ConfigPath       = Join-Path $WorkDir "config.json"
 $EmbeddedGit      = Join-Path $AppDir "PortableGit-64-bit.7z.exe"
-$AppVersion       = "1.6.0"
+$AppVersion       = "1.7.0"
 $AppGitHubRepo    = "crabopal/1c-git-sync"
 
 # === ГЛОБАЛЬНЫЙ КОНТЕКСТ ПРОГРЕССА ===
@@ -994,21 +994,28 @@ function Show-SettingsForm {
     $btnDump = New-Object System.Windows.Forms.Button
     $btnDump.Text = "Выгрузить в Git"
     $btnDump.Left = 5; $btnDump.Top = 7
-    $btnDump.Width = 180; $btnDump.Height = 34
+    $btnDump.Width = 155; $btnDump.Height = 34
     $pnlActions.Controls.Add($btnDump)
     $tip.SetToolTip($btnDump, "Выгружает отмеченный состав на вкладке «Выгрузка» и отправляет коммит в Git")
 
     $btnGit = New-Object System.Windows.Forms.Button
     $btnGit.Text = "Только Git"
-    $btnGit.Left = 195; $btnGit.Top = 7
-    $btnGit.Width = 120; $btnGit.Height = 34
+    $btnGit.Left = 165; $btnGit.Top = 7
+    $btnGit.Width = 110; $btnGit.Height = 34
     $pnlActions.Controls.Add($btnGit)
-    $tip.SetToolTip($btnGit, "Только commit и push уже выгруженных файлов")
+    $tip.SetToolTip($btnGit, "Индексация, commit и push уже выгруженных файлов")
+
+    $btnPushOnly = New-Object System.Windows.Forms.Button
+    $btnPushOnly.Text = "Только push"
+    $btnPushOnly.Left = 280; $btnPushOnly.Top = 7
+    $btnPushOnly.Width = 115; $btnPushOnly.Height = 34
+    $pnlActions.Controls.Add($btnPushOnly)
+    $tip.SetToolTip($btnPushOnly, "Отправляет уже созданные локальные коммиты. Не индексирует файлы и не создаёт коммит")
 
     $btnLoad = New-Object System.Windows.Forms.Button
     $btnLoad.Text = "Загрузить в 1С"
-    $btnLoad.Left = 325; $btnLoad.Top = 7
-    $btnLoad.Width = 180; $btnLoad.Height = 34
+    $btnLoad.Left = 400; $btnLoad.Top = 7
+    $btnLoad.Width = 155; $btnLoad.Height = 34
     $pnlActions.Controls.Add($btnLoad)
     $tip.SetToolTip($btnLoad, "Заменяет конфигурацию в базе файлами из Git по флажкам вкладки «Загрузка»")
 
@@ -1612,10 +1619,11 @@ function Show-SettingsForm {
     $script:ProgressCancelButton = $btnCancelOp
     $script:TimingBox            = $null
     $script:MainTabs             = $tabs
-    $script:ActionButtons        = @($btnDump, $btnGit, $btnLoad, $btnCleanClone, $btnUpdate)
+    $script:ActionButtons        = @($btnDump, $btnGit, $btnPushOnly, $btnLoad, $btnCleanClone, $btnUpdate)
 
     $btnDump.Add_Click({ Start-UiAction -Action "all" })
     $btnGit.Add_Click({ Start-UiAction -Action "git" })
+    $btnPushOnly.Add_Click({ Start-UiAction -Action "push" })
     $btnLoad.Add_Click({ Start-UiAction -Action "load" })
     $btnCleanClone.Add_Click({ Start-UiAction -Action "reclone" })
     $btnUpdate.Add_Click({ Start-AppSelfUpdate -Form $form })
@@ -1845,7 +1853,7 @@ function Test-Config {
     if (-not $action) { $action = "all" }
 
     $need1C = $action -in @("all", "config", "extensions", "load")
-    $needGit = $action -in @("all", "git", "reclone", "load")
+    $needGit = $action -in @("all", "git", "push", "reclone", "load")
 
     if ($need1C) {
         if (-not $Config.PlatformPath) {
@@ -2563,7 +2571,8 @@ function Invoke-GitPushBranch {
         [string]$GitExe,
         [string]$RepoDir,
         [string]$Branch,
-        [bool]$IsFirstCommit
+        [bool]$IsFirstCommit,
+        [switch]$NoReconcile
     )
 
     if ($IsFirstCommit) {
@@ -2579,6 +2588,16 @@ function Invoke-GitPushBranch {
 
     if ($push.ExitCode -eq 0) { return }
 
+    if ($NoReconcile) {
+        $detail = ""
+        if ($push.Stderr) { $detail = $push.Stderr.Trim() }
+        elseif ($push.Stdout) { $detail = $push.Stdout.Trim() }
+        if ($detail) {
+            throw "Push не прошёл (код $($push.ExitCode)). $detail"
+        }
+        throw "Push не прошёл (код $($push.ExitCode)). Удалённая ветка могла уйти вперёд — нажмите «Только Git»."
+    }
+
     Write-Log "Push не прошёл (код $($push.ExitCode)). Проверяем удалённую ветку и повторяем."
 
     $hasRemote = Test-GitRemoteBranchExists -GitExe $GitExe -RepoDir $RepoDir -Branch $Branch
@@ -2590,6 +2609,50 @@ function Invoke-GitPushBranch {
 
     Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
         -GitArgs @("push", "-u", "origin", $refspec)
+}
+
+function Invoke-GitPushOnly {
+    param(
+        [string]$GitExe,
+        [string]$RepoDir,
+        [string]$Branch,
+        [string]$GitHome,
+        [string]$RemoteUrl
+    )
+
+    Test-Cancelled
+    $env:HOME = $GitHome
+    if (-not $Branch) { $Branch = "main" }
+
+    if (-not (Test-Path -LiteralPath (Join-Path $RepoDir ".git"))) {
+        throw "Локальный клон не найден. Сначала выгрузите в Git или нажмите «Только Git»."
+    }
+
+    if ($RemoteUrl) {
+        Sync-GitOriginUrl -GitExe $GitExe -RepoDir $RepoDir -RemoteUrl $RemoteUrl
+    }
+
+    if (-not (Test-GitHeadExists -GitExe $GitExe -RepoDir $RepoDir)) {
+        throw "Нет локального коммита для отправки. Сначала нажмите «Только Git», чтобы создать коммит."
+    }
+
+    $cached = Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
+        -GitArgs @("diff", "--cached", "--quiet") -IgnoreExitCode -Quiet
+    $work = Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
+        -GitArgs @("diff", "--quiet") -IgnoreExitCode -Quiet
+    if ($cached.ExitCode -eq 1 -or $work.ExitCode -eq 1) {
+        Write-Log "Есть незакоммиченные изменения — они не будут отправлены (коммит не создаётся)"
+    }
+
+    Write-Log "Режим: только push, без git add и git commit"
+    Set-Status -Text "Отправка в удалённый репозиторий (git push)..." -Percent 95
+
+    $isFirstCommit = -not (Test-GitRemoteBranchExists -GitExe $GitExe -RepoDir $RepoDir -Branch $Branch)
+    Invoke-GitPushBranch -GitExe $GitExe -RepoDir $RepoDir -Branch $Branch `
+        -IsFirstCommit $isFirstCommit -NoReconcile
+    Set-Status -Text "Отправка в Git завершена" -Percent 98
+    Write-Log "Отправка в Git завершена без нового коммита"
+    return "push"
 }
 
 function Get-ConfigShortName {
@@ -3392,6 +3455,27 @@ function Invoke-SyncPipeline {
         Set-Status -Text "Чистый клон готов" -Percent 100
         Write-Log "Операция успешно завершена"
         Set-TimingSummaryText -Text ("Чистый клон готов.`r`nРепозиторий: {0}`r`nОкончание: {1}" -f $GitRepoUrl, (Format-DateTimeStamp -Value (Get-Date)))
+        return
+    }
+
+    if ($Action -eq "push") {
+        Write-Log "Действие: только push, без git add и git commit"
+        $opStart = Get-Date
+        $EmbeddedGit = Join-Path $AppDir "PortableGit-64-bit.7z.exe"
+        Initialize-PortableGit -EmbeddedArchive $EmbeddedGit
+        Initialize-GitIdentity -GitExe $GitExe -GitHome $GitHome
+        Invoke-GitPushOnly -GitExe $GitExe -RepoDir $GitRepo `
+            -Branch $GitBranch -GitHome $GitHome -RemoteUrl $GitRepoUrl
+        $gitTiming = New-OpTiming -StartedAt $opStart -EndedAt (Get-Date)
+        Write-Log ("Отправка в Git: {0}" -f (Format-ElapsedTime -Elapsed $gitTiming.Elapsed))
+        Set-Status -Text "Готово!" -Percent 100
+        Write-Log "Операция успешно завершена"
+        $doneMessage = "Локальные коммиты отправлены в ветку '$GitBranch' без нового коммита."
+        $timingText = Format-TimingSummary -ConfigTiming $null -ExtensionsTiming $null -GitTiming $gitTiming
+        foreach ($timingLine in ($timingText -split "`r`n")) {
+            if ($timingLine) { Write-Log $timingLine }
+        }
+        Set-TimingSummaryText -Text ($doneMessage + "`r`n`r`n" + $timingText)
         return
     }
 
