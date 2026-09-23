@@ -39,7 +39,7 @@ $GitRepo          = Join-Path $WorkDir "repo"
 $ConfigExportPath = Join-Path $GitRepo "Config"
 $ConfigPath       = Join-Path $WorkDir "config.json"
 $EmbeddedGit      = Join-Path $AppDir "PortableGit-64-bit.7z.exe"
-$AppVersion       = "1.4.0"
+$AppVersion       = "1.5.0"
 $AppGitHubRepo    = "crabopal/1c-git-sync"
 
 # === ГЛОБАЛЬНЫЙ КОНТЕКСТ ПРОГРЕССА ===
@@ -54,7 +54,6 @@ $script:ActionButtons         = @()
 $script:CancelRequested       = $false
 $script:CurrentProcess        = $null
 $script:IsBusy                = $false
-$script:DumpWatchPath         = $null
 $script:DumpWatchTitle        = ""
 $script:DumpWatchStarted      = $null
 $script:DumpWatchLastPoll     = $null
@@ -124,60 +123,29 @@ function Set-Status {
     [System.Windows.Forms.Application]::DoEvents()
 }
 
-function Format-DumpSize {
-    param([int64]$Bytes)
-    if ($Bytes -lt 1KB) { return "$Bytes Б" }
-    if ($Bytes -lt 1MB) { return ("{0} КБ" -f [int][Math]::Round($Bytes / 1KB)) }
-    if ($Bytes -lt 1GB) { return ("{0} МБ" -f [Math]::Round($Bytes / 1MB, 1)) }
-    return ("{0} ГБ" -f [Math]::Round($Bytes / 1GB, 2))
-}
-
-function Get-DumpWatchStats {
-    param([string]$Path)
-    $xmlCount = 0
-    $bytes = [int64]0
-    if (-not $Path -or -not (Test-Path -LiteralPath $Path)) {
-        return [PSCustomObject]@{ XmlCount = 0; Bytes = [int64]0 }
-    }
-    try {
-        $files = [System.IO.Directory]::EnumerateFiles($Path, "*.xml", [System.IO.SearchOption]::AllDirectories)
-        foreach ($f in $files) {
-            $xmlCount++
-            try { $bytes += ([System.IO.FileInfo]$f).Length } catch { }
-        }
-    }
-    catch { }
-    return [PSCustomObject]@{ XmlCount = $xmlCount; Bytes = $bytes }
-}
-
 function Start-DumpWatch {
-    param([string]$Path, [string]$Title)
-    $script:DumpWatchPath = $Path
+    param([string]$Title)
     $script:DumpWatchTitle = $Title
     $script:DumpWatchStarted = Get-Date
     $script:DumpWatchLastPoll = [datetime]::MinValue
 }
 
 function Stop-DumpWatch {
-    $script:DumpWatchPath = $null
     $script:DumpWatchTitle = ""
     $script:DumpWatchStarted = $null
     $script:DumpWatchLastPoll = $null
 }
 
 function Update-DumpWatchStatus {
-    if (-not $script:DumpWatchPath) { return }
+    if (-not $script:DumpWatchStarted) { return }
     $now = Get-Date
     if ($script:DumpWatchLastPoll -and ($now - $script:DumpWatchLastPoll).TotalSeconds -lt 2) { return }
     $script:DumpWatchLastPoll = $now
 
-    $stats = Get-DumpWatchStats -Path $script:DumpWatchPath
-    $elapsed = [TimeSpan]::Zero
-    if ($script:DumpWatchStarted) { $elapsed = $now - $script:DumpWatchStarted }
-    $countText = $stats.XmlCount.ToString("N0")
+    $elapsed = $now - $script:DumpWatchStarted
     $title = $script:DumpWatchTitle
     if (-not $title) { $title = "Выгрузка" }
-    Set-Status -Text ("{0} — {1}, {2} XML, {3}" -f $title, (Format-ElapsedTime -Elapsed $elapsed), $countText, (Format-DumpSize -Bytes $stats.Bytes))
+    Set-Status -Text ("{0} — {1}" -f $title, (Format-ElapsedTime -Elapsed $elapsed))
 }
 
 function Initialize-WorkDir {
@@ -3013,7 +2981,7 @@ function Invoke-1CExport {
 
         Write-Log $title
         Set-Status -Text "$title..." -Percent $ProgressFrom
-        Start-DumpWatch -Path $short.DumpPath -Title $title
+        Start-DumpWatch -Title $title
 
         try {
             $marker = Join-Path $OutputPath "Configuration.xml"
@@ -3112,7 +3080,7 @@ function Invoke-1CLoad {
         if ($useUpdate) { Write-Log "Режим загрузки: инкрементальная (-update)" }
         else { Write-Log "Режим загрузки: полная" }
         Set-Status -Text "$title..." -Percent $ProgressFrom
-        Start-DumpWatch -Path $short.DumpPath -Title $title
+        Start-DumpWatch -Title $title
 
         try {
             Invoke-1CDesigner -Platform $Platform -ArgumentString $ArgLine | Out-Null
@@ -3225,7 +3193,7 @@ function Get-1CExtensionsList {
 
     $ConnParams = Get-1CConnectionParams -DBType $DBType -BasePath $BasePath
     $ArgLine = "DESIGNER $ConnParams /N `"$User`" /P `"$Password`" /DumpConfigToFiles $dumpArg -AllExtensions -Format Hierarchical"
-    Start-DumpWatch -Path $short.DumpPath -Title "Получение списка расширений"
+    Start-DumpWatch -Title "Получение списка расширений"
 
     try {
         Invoke-1CDesigner -Platform $Platform -ArgumentString $ArgLine -IgnoreExitCode | Out-Null
