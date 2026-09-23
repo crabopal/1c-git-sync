@@ -39,7 +39,7 @@ $GitRepo          = Join-Path $WorkDir "repo"
 $ConfigExportPath = Join-Path $GitRepo "Config"
 $ConfigPath       = Join-Path $WorkDir "config.json"
 $EmbeddedGit      = Join-Path $AppDir "PortableGit-64-bit.7z.exe"
-$AppVersion       = "1.5.0"
+$AppVersion       = "1.6.0"
 $AppGitHubRepo    = "crabopal/1c-git-sync"
 
 # === ГЛОБАЛЬНЫЙ КОНТЕКСТ ПРОГРЕССА ===
@@ -2326,6 +2326,44 @@ function Initialize-PortableGit {
     Write-Log "PortableGit распакован"
 }
 
+function Initialize-GitLargeRepoConfig {
+    param(
+        [string]$GitExe,
+        [string]$RepoDir
+    )
+
+    if (-not (Test-Path -LiteralPath (Join-Path $RepoDir ".git"))) { return }
+
+    $pairs = @(
+        @{ Key = "feature.manyFiles";   Value = "true" },
+        @{ Key = "core.untrackedCache"; Value = "true" },
+        @{ Key = "core.fsmonitor";      Value = "true" },
+        @{ Key = "index.threads";       Value = "0" }
+    )
+
+    $changed = @()
+    foreach ($p in $pairs) {
+        $got = Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
+            -GitArgs @("config", "--local", "--get", $p.Key) -IgnoreExitCode -Quiet
+        $cur = ""
+        if ($got.Stdout) { $cur = $got.Stdout.Trim() }
+        if ($cur -eq $p.Value) { continue }
+
+        $set = Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
+            -GitArgs @("config", "--local", $p.Key, $p.Value) -IgnoreExitCode -Quiet
+        if ($set.ExitCode -eq 0) {
+            $changed += "$($p.Key)=$($p.Value)"
+        }
+        else {
+            Write-Log "Не удалось задать git $($p.Key)=$($p.Value)"
+        }
+    }
+
+    if ($changed.Count -gt 0) {
+        Write-Log ("Git для большого дерева файлов: " + ($changed -join ", "))
+    }
+}
+
 # === ПОДГОТОВКА РЕПОЗИТОРИЯ ===
 function Initialize-GitRepository {
     param(
@@ -2399,6 +2437,8 @@ function Initialize-GitRepository {
     else {
         Write-Log "Удалённая ветка '$Branch' ещё не создана — первый push её опубликует"
     }
+
+    Initialize-GitLargeRepoConfig -GitExe $GitExe -RepoDir $RepoDir
 }
 
 function Sync-GitWorktreeToOrigin {
@@ -2645,43 +2685,62 @@ function Invoke-GitPublish {
     }
 
     Set-Status -Text "Добавление изменений в индекс..." -Percent 90
-    Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir -GitArgs @("add", "-A")
+    Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
+        -GitArgs @("-c", "index.threads=0", "add", "-A")
     $skippedHuge = Undo-OversizedGitIndex -GitExe $GitExe -RepoDir $RepoDir
 
-    $statusResult = Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
-        -GitArgs @("status", "--porcelain") -IgnoreExitCode
-    $statusText = ""
-    if ($statusResult.Stdout) { $statusText = $statusResult.Stdout.TrimEnd() }
-
-    if ($skippedHuge.Count -gt 0) {
-        $skipBlock = "Пропущены файлы больше 95 МиБ:`r`n" + ($skippedHuge -join "`r`n")
-        if ($statusText) { $statusText = $skipBlock + "`r`n`r`n" + $statusText }
-        else { $statusText = $skipBlock }
-    }
-
-    if (-not $statusResult.Stdout -or -not $statusResult.Stdout.Trim()) {
-        if ($skippedHuge.Count -gt 0) {
-            Write-Log "После исключения крупных файлов изменений для коммита нет"
-        }
-        else {
-            Write-Log "Нет изменений для коммита"
-        }
-        Set-Status -Text "Нет изменений для коммита" -Percent 98
-        return "none"
-    }
-
-    $statResult = Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
-        -GitArgs @("diff", "--cached", "--stat") -IgnoreExitCode
-    $statText = ""
-    if ($statResult.Stdout) { $statText = $statResult.Stdout.TrimEnd() }
-
-    $defaultMsg = New-GitCommitMessage -RepoDir $RepoDir -InfobasePath $InfobasePath
-
     if ($AutoConfirm) {
+        $cached = Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
+            -GitArgs @("diff", "--cached", "--quiet") -IgnoreExitCode -Quiet
+        if ($cached.ExitCode -eq 0) {
+            if ($skippedHuge.Count -gt 0) {
+                Write-Log "После исключения крупных файлов изменений для коммита нет"
+            }
+            else {
+                Write-Log "Нет изменений для коммита"
+            }
+            Set-Status -Text "Нет изменений для коммита" -Percent 98
+            return "none"
+        }
+        if ($cached.ExitCode -ne 1) {
+            throw "git diff --cached --quiet завершился с кодом $($cached.ExitCode)"
+        }
+        if ($skippedHuge.Count -gt 0) {
+            Write-Log ("Пропущены файлы больше 95 МиБ:`r`n" + ($skippedHuge -join "`r`n"))
+        }
+        $defaultMsg = New-GitCommitMessage -RepoDir $RepoDir -InfobasePath $InfobasePath
         Write-Log "Автоподтверждение коммита включено — окно ревью пропущено"
         $review = [PSCustomObject]@{ Action = "push"; Message = $defaultMsg }
     }
     else {
+        $statusResult = Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
+            -GitArgs @("status", "--porcelain") -IgnoreExitCode
+        $statusText = ""
+        if ($statusResult.Stdout) { $statusText = $statusResult.Stdout.TrimEnd() }
+
+        if ($skippedHuge.Count -gt 0) {
+            $skipBlock = "Пропущены файлы больше 95 МиБ:`r`n" + ($skippedHuge -join "`r`n")
+            if ($statusText) { $statusText = $skipBlock + "`r`n`r`n" + $statusText }
+            else { $statusText = $skipBlock }
+        }
+
+        if (-not $statusResult.Stdout -or -not $statusResult.Stdout.Trim()) {
+            if ($skippedHuge.Count -gt 0) {
+                Write-Log "После исключения крупных файлов изменений для коммита нет"
+            }
+            else {
+                Write-Log "Нет изменений для коммита"
+            }
+            Set-Status -Text "Нет изменений для коммита" -Percent 98
+            return "none"
+        }
+
+        $statResult = Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
+            -GitArgs @("diff", "--cached", "--stat") -IgnoreExitCode
+        $statText = ""
+        if ($statResult.Stdout) { $statText = $statResult.Stdout.TrimEnd() }
+
+        $defaultMsg = New-GitCommitMessage -RepoDir $RepoDir -InfobasePath $InfobasePath
         Set-ProgressCancelEnabled -Enabled $false
         $review = Show-DiffReviewForm -StatusText $statusText -StatText $statText -DefaultMessage $defaultMsg
         Set-ProgressCancelEnabled -Enabled $true
