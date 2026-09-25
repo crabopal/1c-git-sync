@@ -39,7 +39,7 @@ $GitRepo          = Join-Path $WorkDir "repo"
 $ConfigExportPath = Join-Path $GitRepo "Config"
 $ConfigPath       = Join-Path $WorkDir "config.json"
 $EmbeddedGit      = Join-Path $AppDir "PortableGit-64-bit.7z.exe"
-$AppVersion       = "1.8.0"
+$AppVersion       = "1.9.0"
 $AppGitHubRepo    = "crabopal/1c-git-sync"
 
 # === ГЛОБАЛЬНЫЙ КОНТЕКСТ ПРОГРЕССА ===
@@ -2527,6 +2527,9 @@ function Ensure-DumpGitIgnore {
     $required = @(
         "# Vendor parent configurations — .cf often exceeds GitLab/GitHub 100 MiB blob limit",
         "/Config/Ext/ParentConfigurations/*.cf",
+        "/Config/Ext/ParentConfigurations.bin",
+        "/Config/Configuration.ParentConfigurations.bin",
+        "/Config/Configuration.ParentConfigurations",
         "*.cf"
     )
 
@@ -3190,6 +3193,52 @@ function Get-RepoExtensionNames {
     return ,$names
 }
 
+function Test-VendorParentCfPresent {
+    param([string]$DumpPath)
+    $dir = Join-Path $DumpPath "Ext\ParentConfigurations"
+    if (-not (Test-Path -LiteralPath $dir)) { return $false }
+    $cfs = @(Get-ChildItem -LiteralPath $dir -Filter "*.cf" -File -ErrorAction SilentlyContinue)
+    return ($cfs.Count -gt 0)
+}
+
+function Repair-DumpCatalogForLoad {
+    param([string]$DumpPath)
+    if (-not $DumpPath -or -not (Test-Path -LiteralPath $DumpPath)) { return }
+
+    if (Test-VendorParentCfPresent -DumpPath $DumpPath) {
+        Write-Log "Найдены файлы конфигурации поставщика (*.cf) — загрузка с поддержкой"
+        return
+    }
+
+    $candidates = @(
+        (Join-Path $DumpPath "Configuration.ParentConfigurations.bin"),
+        (Join-Path $DumpPath "Configuration.ParentConfigurations.xml"),
+        (Join-Path $DumpPath "Configuration.ParentConfigurations"),
+        (Join-Path $DumpPath "Ext\ParentConfigurations.bin"),
+        (Join-Path $DumpPath "Ext\ParentConfigurations.xml")
+    )
+
+    $removed = @()
+    foreach ($f in $candidates) {
+        if (Test-Path -LiteralPath $f) {
+            Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue
+            $removed += [System.IO.Path]::GetFileName($f)
+        }
+    }
+
+    $parentDir = Join-Path $DumpPath "Ext\ParentConfigurations"
+    if (Test-Path -LiteralPath $parentDir) {
+        Remove-Item -LiteralPath $parentDir -Recurse -Force -ErrorAction SilentlyContinue
+        $removed += "Ext/ParentConfigurations/"
+    }
+
+    if ($removed.Count -gt 0) {
+        Write-Log "Файлы конфигурации поставщика (*.cf) не хранятся в Git из-за размера. Настройки поддержки убраны для загрузки:"
+        foreach ($name in $removed) { Write-Log "  $name" }
+        Write-Log "Конфигурация будет загружена как снятая с поддержки"
+    }
+}
+
 function Invoke-1CLoad {
     param(
         [string]$Platform,
@@ -3210,6 +3259,8 @@ function Invoke-1CLoad {
         if ($Extension) { $where = "$InputPath (расширение $Extension)" }
         throw "Нет Configuration.xml для загрузки: $where"
     }
+
+    Repair-DumpCatalogForLoad -DumpPath $InputPath
 
     $title = "Загрузка основной конфигурации в 1С"
     if ($Extension) { $title = "Загрузка расширения в 1С: $Extension" }
