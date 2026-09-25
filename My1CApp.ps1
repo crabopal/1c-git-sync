@@ -39,7 +39,7 @@ $GitRepo          = Join-Path $WorkDir "repo"
 $ConfigExportPath = Join-Path $GitRepo "Config"
 $ConfigPath       = Join-Path $WorkDir "config.json"
 $EmbeddedGit      = Join-Path $AppDir "PortableGit-64-bit.7z.exe"
-$AppVersion       = "1.7.0"
+$AppVersion       = "1.8.0"
 $AppGitHubRepo    = "crabopal/1c-git-sync"
 
 # === ГЛОБАЛЬНЫЙ КОНТЕКСТ ПРОГРЕССА ===
@@ -2261,6 +2261,7 @@ function Initialize-GitIdentity {
 
     & $GitExe config --global core.autocrlf false 2>&1 | Out-Null
     & $GitExe config --global core.safecrlf false 2>&1 | Out-Null
+    & $GitExe config --global core.longpaths true 2>&1 | Out-Null
     & $GitExe config --global init.defaultBranch main 2>&1 | Out-Null
     & $GitExe config --global advice.detachedHead false 2>&1 | Out-Null
     & $GitExe config --global credential.helper manager 2>&1 | Out-Null
@@ -2343,6 +2344,7 @@ function Initialize-GitLargeRepoConfig {
     if (-not (Test-Path -LiteralPath (Join-Path $RepoDir ".git"))) { return }
 
     $pairs = @(
+        @{ Key = "core.longpaths";      Value = "true" },
         @{ Key = "feature.manyFiles";   Value = "true" },
         @{ Key = "core.untrackedCache"; Value = "true" },
         @{ Key = "core.fsmonitor";      Value = "true" },
@@ -2372,6 +2374,18 @@ function Initialize-GitLargeRepoConfig {
     }
 }
 
+function Clear-RepoWorktree {
+    param([string]$RepoDir)
+    if (-not $RepoDir -or -not (Test-Path -LiteralPath $RepoDir)) { return }
+    $items = @(Get-ChildItem -LiteralPath $RepoDir -Force -ErrorAction SilentlyContinue)
+    foreach ($item in $items) {
+        if ($item.Name -eq ".git") { continue }
+        $target = $item.FullName
+        if ($target -notlike "\\?\*") { $target = "\\?\$target" }
+        Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
 # === ПОДГОТОВКА РЕПОЗИТОРИЯ ===
 function Initialize-GitRepository {
     param(
@@ -2380,7 +2394,8 @@ function Initialize-GitRepository {
         [string]$RemoteUrl,
         [string]$Branch,
         [string]$GitHome,
-        [switch]$SkipPullIfDirty
+        [switch]$SkipPullIfDirty,
+        [switch]$ForceCheckout
     )
 
     Test-Cancelled
@@ -2397,10 +2412,12 @@ function Initialize-GitRepository {
         if (-not (Test-Path $WorkDir)) {
             New-Item -ItemType Directory -Path $WorkDir -Force | Out-Null
         }
-        Invoke-Git -GitExe $GitExe -WorkingDirectory $WorkDir -GitArgs @("clone", $RemoteUrl, $RepoDir)
+        Invoke-Git -GitExe $GitExe -WorkingDirectory $WorkDir `
+            -GitArgs @("-c", "core.longpaths=true", "clone", $RemoteUrl, $RepoDir)
     }
 
     Sync-GitOriginUrl -GitExe $GitExe -RepoDir $RepoDir -RemoteUrl $RemoteUrl
+    Initialize-GitLargeRepoConfig -GitExe $GitExe -RepoDir $RepoDir
 
     Set-Status -Text "Подготовка ветки $Branch..." -Percent 35
     Write-Log "Подготовка ветки '$Branch'"
@@ -2414,7 +2431,21 @@ function Initialize-GitRepository {
         Initialize-GitUnbornBranch -GitExe $GitExe -RepoDir $RepoDir -Branch $Branch
     }
 
-    if ($hasRemote -and $hasHead) {
+    if ($ForceCheckout -and $hasRemote) {
+        Write-Log "Принудительно берём origin/$Branch, локальные файлы будут заменены"
+        Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
+            -GitArgs @("-c", "core.longpaths=true", "clean", "-fd") -IgnoreExitCode | Out-Null
+        $co = Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
+            -GitArgs @("-c", "core.longpaths=true", "checkout", "-f", "-B", $Branch, "origin/$Branch") `
+            -IgnoreExitCode
+        if ($co.ExitCode -ne 0) {
+            Write-Log "Checkout не прошёл — удаляем локальные файлы и повторяем"
+            Clear-RepoWorktree -RepoDir $RepoDir
+            Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
+                -GitArgs @("-c", "core.longpaths=true", "checkout", "-f", "-B", $Branch, "origin/$Branch")
+        }
+    }
+    elseif ($hasRemote -and $hasHead) {
         $dirty = $false
         if ($SkipPullIfDirty) {
             $st = Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
@@ -2439,14 +2470,15 @@ function Initialize-GitRepository {
     }
     elseif ($hasRemote -and -not $hasHead) {
         Write-Log "Локально коммитов нет, на origin уже есть '$Branch' — забираем её"
-        Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
-            -GitArgs @("checkout", "-B", $Branch, "origin/$Branch")
+        $co = Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
+            -GitArgs @("checkout", "-B", $Branch, "origin/$Branch") -IgnoreExitCode
+        if ($co.ExitCode -ne 0) {
+            Write-Log "Не удалось переключить ветку без затирания локальных файлов — оставляем текущее дерево"
+        }
     }
     else {
         Write-Log "Удалённая ветка '$Branch' ещё не создана — первый push её опубликует"
     }
-
-    Initialize-GitLargeRepoConfig -GitExe $GitExe -RepoDir $RepoDir
 }
 
 function Sync-GitWorktreeToOrigin {
@@ -2467,17 +2499,23 @@ function Sync-GitWorktreeToOrigin {
         throw "На origin нет ветки '$Branch'. Нечего загружать в 1С."
     }
 
+    Initialize-GitLargeRepoConfig -GitExe $GitExe -RepoDir $RepoDir
+    Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
+        -GitArgs @("-c", "core.longpaths=true", "clean", "-fd") -IgnoreExitCode | Out-Null
+
     $co = Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
-        -GitArgs @("checkout", $Branch) -IgnoreExitCode
+        -GitArgs @("-c", "core.longpaths=true", "checkout", "-f", "-B", $Branch, "origin/$Branch") -IgnoreExitCode
     if ($co.ExitCode -ne 0) {
+        Write-Log "Checkout не прошёл — удаляем локальные файлы и повторяем"
+        Clear-RepoWorktree -RepoDir $RepoDir
         Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
-            -GitArgs @("checkout", "-B", $Branch, "origin/$Branch")
+            -GitArgs @("-c", "core.longpaths=true", "checkout", "-f", "-B", $Branch, "origin/$Branch")
     }
 
     Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
-        -GitArgs @("reset", "--hard", "origin/$Branch")
+        -GitArgs @("-c", "core.longpaths=true", "reset", "--hard", "origin/$Branch")
     Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
-        -GitArgs @("clean", "-fd") -IgnoreExitCode | Out-Null
+        -GitArgs @("-c", "core.longpaths=true", "clean", "-fd") -IgnoreExitCode | Out-Null
     Write-Log "Рабочее дерево совпадает с origin/$Branch"
 }
 
@@ -3493,7 +3531,8 @@ function Invoke-SyncPipeline {
         Initialize-PortableGit -EmbeddedArchive $EmbeddedGit
         Initialize-GitIdentity -GitExe $GitExe -GitHome $GitHome
         Initialize-GitRepository -GitExe $GitExe -RepoDir $GitRepo `
-            -RemoteUrl $GitRepoUrl -Branch $GitBranch -GitHome $GitHome -SkipPullIfDirty
+            -RemoteUrl $GitRepoUrl -Branch $GitBranch -GitHome $GitHome `
+            -SkipPullIfDirty -ForceCheckout
         Sync-GitWorktreeToOrigin -GitExe $GitExe -RepoDir $GitRepo -Branch $GitBranch
         $gitTiming = New-OpTiming -StartedAt $gitPrepStart -EndedAt (Get-Date)
         Write-Log ("Получение из Git: {0}" -f (Format-ElapsedTime -Elapsed $gitTiming.Elapsed))
