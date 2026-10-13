@@ -39,7 +39,7 @@ $GitRepo          = Join-Path $WorkDir "repo"
 $ConfigExportPath = Join-Path $GitRepo "Config"
 $ConfigPath       = Join-Path $WorkDir "config.json"
 $EmbeddedGit      = Join-Path $AppDir "PortableGit-64-bit.7z.exe"
-$AppVersion       = "1.10.0"
+$AppVersion       = "1.11.0"
 $AppGitHubRepo    = "crabopal/1c-git-sync"
 
 # === ГЛОБАЛЬНЫЙ КОНТЕКСТ ПРОГРЕССА ===
@@ -3068,8 +3068,11 @@ function Invoke-1CDesigner {
 # === ВЫГРУЗКА 1С В ФАЙЛЫ ===
 function Test-DumpCatalogReady {
     param([string]$Path)
-    if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return $false }
-    return (Test-Path -LiteralPath (Join-Path $Path "Configuration.xml"))
+    if (-not $Path) { return $false }
+    if ($Path -match 'System\.Object\[\]') { return $false }
+    if (-not (Test-Path -LiteralPath $Path)) { return $false }
+    $xmlPath = [System.IO.Path]::Combine($Path, "Configuration.xml")
+    return (Test-Path -LiteralPath $xmlPath)
 }
 
 function Resolve-UseIncrementalDump {
@@ -3182,29 +3185,44 @@ function Invoke-1CExport {
 function Get-RepoExtensionInfos {
     param([string]$RepoDir)
     $result = New-Object System.Collections.Generic.List[object]
-    $root = Join-Path $RepoDir "Extensions"
-    if (-not (Test-Path -LiteralPath $root)) { return ,$result.ToArray() }
+    $root = [System.IO.Path]::Combine([string]$RepoDir, "Extensions")
+    if (-not (Test-Path -LiteralPath $root)) {
+        Write-Output -NoEnumerate $result
+        return
+    }
 
-    $dirs = @(Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue)
+    $dirs = Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue
+    if ($null -eq $dirs) {
+        Write-Output -NoEnumerate $result
+        return
+    }
+    if ($dirs -isnot [System.Array]) { $dirs = @($dirs) }
+
     foreach ($dir in $dirs) {
-        $xmlPath = Join-Path $dir.FullName "Configuration.xml"
+        $folderName = [string]$dir.Name
+        $folderPath = [string]$dir.FullName
+        $xmlPath = [System.IO.Path]::Combine($folderPath, "Configuration.xml")
         if (-not (Test-Path -LiteralPath $xmlPath)) { continue }
         $meta = Get-ConfigurationDumpMeta -ConfigXmlPath $xmlPath
         $internalName = [string]$meta.Name
-        if (-not $internalName) { $internalName = $dir.Name }
+        if (-not $internalName) { $internalName = $folderName }
         $result.Add([PSCustomObject]@{
-            FolderName = $dir.Name
-            Path       = $dir.FullName
+            FolderName = $folderName
+            Path       = $folderPath
             Name       = $internalName
         })
     }
-    return ,$result.ToArray()
+    Write-Output -NoEnumerate $result
 }
 
 function Get-RepoExtensionNames {
     param([string]$RepoDir)
-    $names = @(Get-RepoExtensionInfos -RepoDir $RepoDir | ForEach-Object { $_.Name })
-    return ,$names
+    $names = New-Object System.Collections.Generic.List[string]
+    $infos = Get-RepoExtensionInfos -RepoDir $RepoDir
+    for ($i = 0; $i -lt $infos.Count; $i++) {
+        [void]$names.Add([string]$infos[$i].Name)
+    }
+    Write-Output -NoEnumerate $names
 }
 
 function Test-VendorParentCfPresent {
@@ -3351,22 +3369,27 @@ function Invoke-LoadExtensionsPipeline {
         [bool]$Dynamic
     )
 
-    $AllExtensions = @(Get-RepoExtensionInfos -RepoDir $RepoDir)
+    $AllExtensions = Get-RepoExtensionInfos -RepoDir $RepoDir
     if ($AllExtensions.Count -eq 0) {
         Write-Log "В Git нет расширений с Configuration.xml (папка Extensions)"
         return
     }
+    Write-Log ("В Git найдено расширений: {0}" -f $AllExtensions.Count)
 
     $ExtensionsToLoad = New-Object System.Collections.Generic.List[object]
     if ($SelectManually) {
         Set-ProgressCancelEnabled -Enabled $false
-        $pickerNames = @($AllExtensions | ForEach-Object { $_.FolderName })
-        $selected = @(Show-ExtensionPicker -Extensions $pickerNames -ExcludePrefix $ExcludePrefix `
+        $pickerNames = New-Object System.Collections.Generic.List[string]
+        for ($i = 0; $i -lt $AllExtensions.Count; $i++) {
+            [void]$pickerNames.Add([string]$AllExtensions[$i].FolderName)
+        }
+        $selected = @(Show-ExtensionPicker -Extensions $pickerNames.ToArray() -ExcludePrefix $ExcludePrefix `
             -PromptText "Отметьте расширения для загрузки в 1С:" -AcceptText "Загрузить выбранные")
         Set-ProgressCancelEnabled -Enabled $true
         Test-Cancelled
-        foreach ($ext in $AllExtensions) {
-            if ($selected -contains $ext.FolderName) { [void]$ExtensionsToLoad.Add($ext) }
+        for ($i = 0; $i -lt $AllExtensions.Count; $i++) {
+            $ext = $AllExtensions[$i]
+            if ($selected -contains [string]$ext.FolderName) { [void]$ExtensionsToLoad.Add($ext) }
         }
         if ($ExtensionsToLoad.Count -eq 0) {
             Write-Log "Загрузка расширений пропущена пользователем"
@@ -3374,9 +3397,12 @@ function Invoke-LoadExtensionsPipeline {
         }
     }
     else {
-        foreach ($ext in $AllExtensions) {
-            if ((Test-NameHasPrefix -Name $ext.Name -Prefix $ExcludePrefix) -or
-                (Test-NameHasPrefix -Name $ext.FolderName -Prefix $ExcludePrefix)) {
+        for ($i = 0; $i -lt $AllExtensions.Count; $i++) {
+            $ext = $AllExtensions[$i]
+            $extName = [string]$ext.Name
+            $extFolder = [string]$ext.FolderName
+            if ((Test-NameHasPrefix -Name $extName -Prefix $ExcludePrefix) -or
+                (Test-NameHasPrefix -Name $extFolder -Prefix $ExcludePrefix)) {
                 continue
             }
             [void]$ExtensionsToLoad.Add($ext)
@@ -3388,29 +3414,31 @@ function Invoke-LoadExtensionsPipeline {
     }
 
     $Total = $ExtensionsToLoad.Count
-    $Index = 0
     $failed = New-Object System.Collections.Generic.List[string]
-    foreach ($ext in $ExtensionsToLoad) {
-        $Index++
-        $PercentFrom = 70 + [int](($Index - 1) / $Total * 20)
-        Write-Log ("Расширение '{0}' (папка '{1}')" -f $ext.Name, $ext.FolderName)
-        if (-not (Test-DumpCatalogReady -Path $ext.Path)) {
-            Write-Log "Пропуск расширения '$($ext.Name)': нет Configuration.xml в $($ext.Path)"
-            [void]$failed.Add($ext.Name)
+    for ($Index = 0; $Index -lt $Total; $Index++) {
+        $ext = $ExtensionsToLoad[$Index]
+        $extName = [string]$ext.Name
+        $extFolder = [string]$ext.FolderName
+        $extPath = [string]$ext.Path
+        $PercentFrom = 70 + [int]($Index / $Total * 20)
+        Write-Log ("Расширение '{0}' (папка '{1}')" -f $extName, $extFolder)
+        if (-not (Test-DumpCatalogReady -Path $extPath)) {
+            Write-Log "Пропуск расширения '$extName': нет Configuration.xml в $extPath"
+            [void]$failed.Add($extName)
             continue
         }
         try {
             Invoke-1CLoad -Platform $Platform -DBType $DBType -BasePath $BasePath `
-                -User $User -Password $Password -InputPath $ext.Path `
-                -Extension $ext.Name -UpdateDB $UpdateDB -Dynamic $Dynamic `
+                -User $User -Password $Password -InputPath $extPath `
+                -Extension $extName -UpdateDB $UpdateDB -Dynamic $Dynamic `
                 -ProgressFrom $PercentFrom
         }
         catch [System.OperationCanceledException] {
             throw
         }
         catch {
-            Write-Log "Ошибка загрузки расширения '$($ext.Name)': $_" "ERROR"
-            [void]$failed.Add($ext.Name)
+            Write-Log "Ошибка загрузки расширения '$extName': $_" "ERROR"
+            [void]$failed.Add($extName)
         }
     }
     if ($failed.Count -gt 0) {
