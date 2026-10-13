@@ -39,7 +39,7 @@ $GitRepo          = Join-Path $WorkDir "repo"
 $ConfigExportPath = Join-Path $GitRepo "Config"
 $ConfigPath       = Join-Path $WorkDir "config.json"
 $EmbeddedGit      = Join-Path $AppDir "PortableGit-64-bit.7z.exe"
-$AppVersion       = "1.11.0"
+$AppVersion       = "1.12.0"
 $AppGitHubRepo    = "crabopal/1c-git-sync"
 
 # === ГЛОБАЛЬНЫЙ КОНТЕКСТ ПРОГРЕССА ===
@@ -3141,9 +3141,9 @@ function Invoke-1CExport {
 
         $ConnParams = Get-1CConnectionParams -DBType $DBType -BasePath $BasePath
         $ArgLine = "DESIGNER $ConnParams /N `"$User`" /P `"$Password`" /DumpConfigToFiles $dumpArg"
+        if ($Extension) { $ArgLine += " -Extension `"$Extension`"" }
         if ($useUpdate) { $ArgLine += " -update" }
         $ArgLine += " -Format Hierarchical"
-        if ($Extension) { $ArgLine += " -Extension `"$Extension`"" }
 
         Write-Log $title
         Set-Status -Text "$title..." -Percent $ProgressFrom
@@ -3300,6 +3300,7 @@ function Invoke-1CLoad {
     $useUpdate = Test-Path -LiteralPath (Join-Path $InputPath "ConfigDumpInfo.xml")
     $attemptedUpdate = $useUpdate
     $done = $false
+    $ConnParams = Get-1CConnectionParams -DBType $DBType -BasePath $BasePath
 
     while (-not $done) {
         Test-Cancelled
@@ -3307,17 +3308,10 @@ function Invoke-1CLoad {
         $dumpArg = $short.DumpPath
         if ($dumpArg -match '\s') { $dumpArg = "`"$dumpArg`"" }
 
-        $ConnParams = Get-1CConnectionParams -DBType $DBType -BasePath $BasePath
         $ArgLine = "DESIGNER $ConnParams /N `"$User`" /P `"$Password`" /LoadConfigFromFiles $dumpArg"
-        if ($useUpdate) { $ArgLine += " -update" }
         if ($Extension) { $ArgLine += " -Extension `"$Extension`"" }
+        if ($useUpdate) { $ArgLine += " -update" }
         $ArgLine += " -Format Hierarchical"
-        if ($UpdateDB) {
-            $ArgLine += " /UpdateDBCfg"
-            if ($Dynamic) { $ArgLine += " -Dynamic+" }
-            else { $ArgLine += " -Dynamic-" }
-            if ($Extension) { $ArgLine += " -Extension `"$Extension`"" }
-        }
 
         Write-Log $title
         if ($useUpdate) { Write-Log "Режим загрузки: инкрементальная (-update)" }
@@ -3349,6 +3343,25 @@ function Invoke-1CLoad {
 
         if (-not $done -and -not $useUpdate -and $attemptedUpdate) {
             $attemptedUpdate = $false
+        }
+    }
+
+    if ($UpdateDB) {
+        Test-Cancelled
+        $updTitle = "Обновление конфигурации БД"
+        if ($Extension) { $updTitle = "Обновление расширения в БД: $Extension" }
+        Write-Log $updTitle
+        Set-Status -Text "$updTitle..." -Percent ([Math]::Min(99, $ProgressFrom + 8))
+        $updArgs = "DESIGNER $ConnParams /N `"$User`" /P `"$Password`" /UpdateDBCfg"
+        if ($Dynamic) { $updArgs += " -Dynamic+" }
+        else { $updArgs += " -Dynamic-" }
+        if ($Extension) { $updArgs += " -Extension `"$Extension`"" }
+        Start-DumpWatch -Title $updTitle
+        try {
+            Invoke-1CDesigner -Platform $Platform -ArgumentString $updArgs | Out-Null
+        }
+        finally {
+            Stop-DumpWatch
         }
     }
 
