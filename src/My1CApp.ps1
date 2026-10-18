@@ -154,7 +154,7 @@ $GitHome          = Join-Path $WorkDir "git-home"
 $GitRepo          = Join-Path $WorkDir "repo"
 $ConfigExportPath = Join-Path $GitRepo "Config"
 $ConfigPath       = Join-Path $WorkDir "config.json"
-$AppVersion       = "2.0.1"
+$AppVersion       = "2.0.2"
 $AppGitHubRepo    = "crabopal/1c-git-sync"
 
 # === ГЛОБАЛЬНЫЙ КОНТЕКСТ ПРОГРЕССА ===
@@ -169,9 +169,6 @@ $script:ActionButtons         = @()
 $script:CancelRequested       = $false
 $script:CurrentProcess        = $null
 $script:IsBusy                = $false
-$script:DumpWatchTitle        = ""
-$script:DumpWatchStarted      = $null
-$script:DumpWatchLastPoll     = $null
 $script:Ui                    = @{}
 $script:LogExpanded           = $false
 $script:SetLogExpanded        = $null
@@ -238,31 +235,6 @@ function Set-Status {
     [System.Windows.Forms.Application]::DoEvents()
 }
 
-function Start-DumpWatch {
-    param([string]$Title)
-    $script:DumpWatchTitle = $Title
-    $script:DumpWatchStarted = Get-Date
-    $script:DumpWatchLastPoll = [datetime]::MinValue
-}
-
-function Stop-DumpWatch {
-    $script:DumpWatchTitle = ""
-    $script:DumpWatchStarted = $null
-    $script:DumpWatchLastPoll = $null
-}
-
-function Update-DumpWatchStatus {
-    if (-not $script:DumpWatchStarted) { return }
-    $now = Get-Date
-    if ($script:DumpWatchLastPoll -and ($now - $script:DumpWatchLastPoll).TotalSeconds -lt 2) { return }
-    $script:DumpWatchLastPoll = $now
-
-    $elapsed = $now - $script:DumpWatchStarted
-    $title = $script:DumpWatchTitle
-    if (-not $title) { $title = "Выгрузка" }
-    Set-Status -Text ("{0} — {1}" -f $title, (Format-ElapsedTime -Elapsed $elapsed))
-}
-
 function Initialize-WorkDir {
     if (-not (Test-Path $WorkDir)) {
         New-Item -ItemType Directory -Path $WorkDir -Force | Out-Null
@@ -308,7 +280,6 @@ function Wait-CancellableProcess {
     $script:CurrentProcess = $Process
     try {
         while (-not $Process.WaitForExit($PollMs)) {
-            Update-DumpWatchStatus
             [System.Windows.Forms.Application]::DoEvents()
             if ($script:CancelRequested) {
                 Stop-TrackedProcess -Proc $Process
@@ -373,7 +344,6 @@ function Invoke-CancellableProcess {
     $StderrTask = $Proc.StandardError.ReadToEndAsync()
 
     while (-not $Proc.WaitForExit(300)) {
-        Update-DumpWatchStatus
         [System.Windows.Forms.Application]::DoEvents()
         if ($script:CancelRequested) {
             Stop-TrackedProcess -Proc $Proc
@@ -2105,9 +2075,19 @@ function Load-SavedConfig {
 function Set-TimingSummaryText {
     param([string]$Text)
     $script:LastTimingSummary = $Text
-    if ($script:ProgressLabel -and -not $script:ProgressLabel.IsDisposed) {
-        $lines = @($Text -split "`r`n" | Where-Object { $_.Trim() })
-        $script:ProgressLabel.Text = (($lines | Select-Object -First 2) -join "  ·  ")
+    if (-not $script:ProgressLabel -or $script:ProgressLabel.IsDisposed) { return }
+    $lines = @($Text -split "`r`n" | Where-Object { $_.Trim() })
+    if ($lines.Count -eq 0) { return }
+    $head = [string]$lines[0]
+    $total = $null
+    foreach ($line in $lines) {
+        if ($line -like "Всего:*") { $total = [string]$line; break }
+    }
+    if ($total -and $total -ne $head) {
+        $script:ProgressLabel.Text = "$head  ·  $total"
+    }
+    else {
+        $script:ProgressLabel.Text = $head
     }
 }
 
@@ -2174,7 +2154,6 @@ function Start-UiAction {
             [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
     }
     finally {
-        Stop-DumpWatch
         Close-ProgressForm
         Set-MainFormBusy -Busy $false
         if ($script:LastTimingSummary) {
@@ -2504,50 +2483,41 @@ function New-OpTiming {
 
 function Format-TimingSummary {
     param(
-        $ConfigTiming,
-        $ExtensionsTiming,
-        $GitTiming,
-        [string]$Kind = "Dump"
+        [object[]]$Steps,
+        [datetime]$StartedAt,
+        [datetime]$EndedAt
     )
 
-    $fmt = {
-        param($timing)
-        if ($timing) { Format-ElapsedTime -Elapsed $timing.Elapsed } else { "не выполнялась" }
-    }
-
-    $cfgLabel = "Выгрузка конфигурации"
-    $extLabel = "Выгрузка расширений"
-    $gitLabel = "Синхронизация с Git"
-    if ($Kind -eq "Load") {
-        $cfgLabel = "Загрузка конфигурации"
-        $extLabel = "Загрузка расширений"
-        $gitLabel = "Получение из Git"
-    }
-
     $lines = New-Object System.Collections.Generic.List[string]
-    $lines.Add("${cfgLabel}: $( & $fmt $ConfigTiming )")
-    $lines.Add("${extLabel}: $( & $fmt $ExtensionsTiming )")
-    $lines.Add("${gitLabel}: $( & $fmt $GitTiming )")
-
-    $performed = New-Object System.Collections.Generic.List[object]
-    if ($ConfigTiming) { [void]$performed.Add($ConfigTiming) }
-    if ($ExtensionsTiming) { [void]$performed.Add($ExtensionsTiming) }
-    if ($GitTiming) { [void]$performed.Add($GitTiming) }
-
-    if ($performed.Count -gt 0) {
-        $startedAt = $performed[0].StartedAt
-        $endedAt = $performed[0].EndedAt
-        foreach ($op in $performed) {
-            if ($op.StartedAt -lt $startedAt) { $startedAt = $op.StartedAt }
-            if ($op.EndedAt -gt $endedAt) { $endedAt = $op.EndedAt }
+    foreach ($step in @($Steps)) {
+        if (-not $step) { continue }
+        $elapsedText = "не выполнялась"
+        if ($step.Timing) {
+            $elapsedText = Format-ElapsedTime -Elapsed $step.Timing.Elapsed
         }
-        $lines.Add("")
-        $lines.Add("Всего: $(Format-ElapsedTime -Elapsed ($endedAt - $startedAt))")
-        $lines.Add("Начало: $(Format-DateTimeStamp -Value $startedAt)")
-        $lines.Add("Окончание: $(Format-DateTimeStamp -Value $endedAt)")
+        $lines.Add("$($step.Name): $elapsedText")
     }
 
+    $lines.Add("")
+    $lines.Add("Всего: $(Format-ElapsedTime -Elapsed ($EndedAt - $StartedAt))")
+    $lines.Add("Начало: $(Format-DateTimeStamp -Value $StartedAt)")
+    $lines.Add("Окончание: $(Format-DateTimeStamp -Value $EndedAt)")
     return ($lines -join "`r`n")
+}
+
+function New-TimingStep {
+    param([string]$Name, $Timing)
+    return [PSCustomObject]@{
+        Name   = $Name
+        Timing = $Timing
+    }
+}
+
+function Write-TimingSummary {
+    param([string]$Text)
+    foreach ($timingLine in ($Text -split "`r`n")) {
+        if ($timingLine) { Write-Log $timingLine }
+    }
 }
 
 function Show-CompletionForm {
@@ -3068,11 +3038,13 @@ function Invoke-GitPushOnly {
     }
 
     Write-Log "Режим: только push, без git add и git commit"
+    $pushStart = Get-Date
     Set-Status -Text "Отправка в удалённый репозиторий (git push)..." -Percent 95
 
     $isFirstCommit = -not (Test-GitRemoteBranchExists -GitExe $GitExe -RepoDir $RepoDir -Branch $Branch)
     Invoke-GitPushBranch -GitExe $GitExe -RepoDir $RepoDir -Branch $Branch `
         -IsFirstCommit $isFirstCommit -NoReconcile
+    $script:RemotePushTiming = New-OpTiming -StartedAt $pushStart -EndedAt (Get-Date)
     Set-Status -Text "Отправка в Git завершена" -Percent 98
     Write-Log "Отправка в Git завершена без нового коммита"
     return "push"
@@ -3159,6 +3131,8 @@ function Invoke-GitPublish {
 
     Test-Cancelled
     $env:HOME = $GitHome
+    $script:IndexCommitTiming = $null
+    $script:RemotePushTiming = $null
 
     if (-not $Branch) { $Branch = "main" }
 
@@ -3170,6 +3144,7 @@ function Invoke-GitPublish {
         Write-Log "Режим первого коммита: pull не выполняется, ветка будет создана на сервере при push"
     }
 
+    $indexStart = Get-Date
     Set-Status -Text "Добавление изменений в индекс..." -Percent 90
     Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
         -GitArgs @("-c", "index.threads=0", "add", "-A")
@@ -3186,6 +3161,7 @@ function Invoke-GitPublish {
                 Write-Log "Нет изменений для коммита"
             }
             Set-Status -Text "Нет изменений для коммита" -Percent 98
+            $script:IndexCommitTiming = New-OpTiming -StartedAt $indexStart -EndedAt (Get-Date)
             return "none"
         }
         if ($cached.ExitCode -ne 1) {
@@ -3218,6 +3194,7 @@ function Invoke-GitPublish {
                 Write-Log "Нет изменений для коммита"
             }
             Set-Status -Text "Нет изменений для коммита" -Percent 98
+            $script:IndexCommitTiming = New-OpTiming -StartedAt $indexStart -EndedAt (Get-Date)
             return "none"
         }
 
@@ -3242,6 +3219,7 @@ function Invoke-GitPublish {
             Invoke-GitUnstageAll -GitExe $GitExe -RepoDir $RepoDir
             Write-Log "Отправка в Git пропущена пользователем"
             Set-Status -Text "Изменения оставлены локально" -Percent 98
+            $script:IndexCommitTiming = New-OpTiming -StartedAt $indexStart -EndedAt (Get-Date)
             return "skip"
         }
         "push" {
@@ -3251,8 +3229,11 @@ function Invoke-GitPublish {
             Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir -GitArgs @("commit", "-m", $msg)
             Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
                 -GitArgs @("branch", "-M", $Branch) -IgnoreExitCode | Out-Null
+            $script:IndexCommitTiming = New-OpTiming -StartedAt $indexStart -EndedAt (Get-Date)
+            $pushStart = Get-Date
             Set-Status -Text "Отправка в удалённый репозиторий (git push)..." -Percent 95
             Invoke-GitPushBranch -GitExe $GitExe -RepoDir $RepoDir -Branch $Branch -IsFirstCommit $isFirstCommit
+            $script:RemotePushTiming = New-OpTiming -StartedAt $pushStart -EndedAt (Get-Date)
             Set-Status -Text "Синхронизация с Git завершена" -Percent 98
             Write-Log "Синхронизация с Git завершена"
             return "push"
@@ -3529,7 +3510,6 @@ function Invoke-1CExport {
 
         Write-Log $title
         Set-Status -Text "$title..." -Percent $ProgressFrom
-        Start-DumpWatch -Title $title
 
         try {
             $marker = Join-Path $OutputPath "Configuration.xml"
@@ -3551,7 +3531,6 @@ function Invoke-1CExport {
             }
         }
         finally {
-            Stop-DumpWatch
             Exit-ShortDumpPath -Info $short
         }
 
@@ -3683,6 +3662,7 @@ function Invoke-1CLoad {
     $attemptedUpdate = $useUpdate
     $done = $false
     $ConnParams = Get-1CConnectionParams -DBType $DBType -BasePath $BasePath
+    $loadStart = Get-Date
 
     while (-not $done) {
         Test-Cancelled
@@ -3699,7 +3679,6 @@ function Invoke-1CLoad {
         if ($useUpdate) { Write-Log "Режим загрузки: инкрементальная (-update)" }
         else { Write-Log "Режим загрузки: полная" }
         Set-Status -Text "$title..." -Percent $ProgressFrom
-        Start-DumpWatch -Title $title
 
         try {
             Invoke-1CDesigner -Platform $Platform -ArgumentString $ArgLine | Out-Null
@@ -3719,7 +3698,6 @@ function Invoke-1CLoad {
             }
         }
         finally {
-            Stop-DumpWatch
             Exit-ShortDumpPath -Info $short
         }
 
@@ -3728,6 +3706,8 @@ function Invoke-1CLoad {
         }
     }
 
+    $loadElapsed = (Get-Date) - $loadStart
+    $dbElapsed = $null
     if ($UpdateDB) {
         Test-Cancelled
         $updTitle = "Обновление конфигурации БД"
@@ -3738,16 +3718,20 @@ function Invoke-1CLoad {
         if ($Dynamic) { $updArgs += " -Dynamic+" }
         else { $updArgs += " -Dynamic-" }
         if ($Extension) { $updArgs += " -Extension `"$Extension`"" }
-        Start-DumpWatch -Title $updTitle
+        $dbStart = Get-Date
         try {
             Invoke-1CDesigner -Platform $Platform -ArgumentString $updArgs | Out-Null
         }
         finally {
-            Stop-DumpWatch
+            $dbElapsed = (Get-Date) - $dbStart
         }
     }
 
     Write-Log "Загрузка завершена: $InputPath"
+    return [PSCustomObject]@{
+        LoadElapsed = $loadElapsed
+        DbElapsed   = $dbElapsed
+    }
 }
 
 function Invoke-LoadExtensionsPipeline {
@@ -3810,6 +3794,10 @@ function Invoke-LoadExtensionsPipeline {
 
     $Total = $ExtensionsToLoad.Count
     $failed = New-Object System.Collections.Generic.List[string]
+    $loadElapsed = [TimeSpan]::Zero
+    $dbElapsed = [TimeSpan]::Zero
+    $didLoad = $false
+    $didDb = $false
     for ($Index = 0; $Index -lt $Total; $Index++) {
         $ext = $ExtensionsToLoad[$Index]
         $extName = [string]$ext.Name
@@ -3823,10 +3811,16 @@ function Invoke-LoadExtensionsPipeline {
             continue
         }
         try {
-            Invoke-1CLoad -Platform $Platform -DBType $DBType -BasePath $BasePath `
+            $part = Invoke-1CLoad -Platform $Platform -DBType $DBType -BasePath $BasePath `
                 -User $User -Password $Password -InputPath $extPath `
                 -Extension $extName -UpdateDB $UpdateDB -Dynamic $Dynamic `
                 -ProgressFrom $PercentFrom
+            $didLoad = $true
+            $loadElapsed += $part.LoadElapsed
+            if ($null -ne $part.DbElapsed) {
+                $didDb = $true
+                $dbElapsed += $part.DbElapsed
+            }
         }
         catch [System.OperationCanceledException] {
             throw
@@ -3841,6 +3835,12 @@ function Invoke-LoadExtensionsPipeline {
         if ($failed.Count -eq $Total) {
             throw "Не удалось загрузить ни одного расширения"
         }
+    }
+
+    if (-not $didLoad) { return $null }
+    return [PSCustomObject]@{
+        LoadElapsed = $loadElapsed
+        DbElapsed   = $(if ($didDb) { $dbElapsed } else { $null })
     }
 }
 
@@ -3870,7 +3870,6 @@ function Get-1CExtensionsList {
 
     $ConnParams = Get-1CConnectionParams -DBType $DBType -BasePath $BasePath
     $ArgLine = "DESIGNER $ConnParams /N `"$User`" /P `"$Password`" /DumpConfigToFiles $dumpArg -AllExtensions -Format Hierarchical"
-    Start-DumpWatch -Title "Получение списка расширений"
 
     try {
         Invoke-1CDesigner -Platform $Platform -ArgumentString $ArgLine -IgnoreExitCode | Out-Null
@@ -3880,7 +3879,6 @@ function Get-1CExtensionsList {
         throw
     }
     finally {
-        Stop-DumpWatch
         Exit-ShortDumpPath -Info $short
     }
 
@@ -3985,10 +3983,10 @@ function Invoke-SyncPipeline {
     $doGitPublish = $Action -in @("all", "git")
     $doGitPrepare = $doGitPublish -or (($doMain -or $doExt) -and $GitRepoUrl) -or ($Action -eq "reclone")
 
-    $configTiming = $null
-    $extTiming = $null
-    $gitTiming = $null
+    $script:IndexCommitTiming = $null
+    $script:RemotePushTiming = $null
 
+    $runStarted = Get-Date
     Show-ProgressForm
     Set-Status -Text "Начало работы..." -Percent 5
     Write-Log "Действие: $Action"
@@ -4014,20 +4012,20 @@ function Invoke-SyncPipeline {
 
     if ($Action -eq "push") {
         Write-Log "Действие: только push, без git add и git commit"
-        $opStart = Get-Date
         Initialize-PortableGit -EmbeddedArchive $EmbeddedGit
         Initialize-GitIdentity -GitExe $GitExe -GitHome $GitHome
         Invoke-GitPushOnly -GitExe $GitExe -RepoDir $GitRepo `
             -Branch $GitBranch -GitHome $GitHome -RemoteUrl $GitRepoUrl
-        $gitTiming = New-OpTiming -StartedAt $opStart -EndedAt (Get-Date)
-        Write-Log ("Отправка в Git: {0}" -f (Format-ElapsedTime -Elapsed $gitTiming.Elapsed))
         Set-Status -Text "Готово!" -Percent 100
         Write-Log "Операция успешно завершена"
         $doneMessage = "Локальные коммиты отправлены в ветку '$GitBranch' без нового коммита."
-        $timingText = Format-TimingSummary -ConfigTiming $null -ExtensionsTiming $null -GitTiming $gitTiming
-        foreach ($timingLine in ($timingText -split "`r`n")) {
-            if ($timingLine) { Write-Log $timingLine }
-        }
+        $timingText = Format-TimingSummary -StartedAt $runStarted -EndedAt (Get-Date) -Steps @(
+            (New-TimingStep -Name "Выгрузка основной конфигурации"),
+            (New-TimingStep -Name "Выгрузка расширений"),
+            (New-TimingStep -Name "Добавление изменений в индекс и коммит"),
+            (New-TimingStep -Name "Отправка в удалённый репозиторий" -Timing $script:RemotePushTiming)
+        )
+        Write-TimingSummary -Text $timingText
         Set-TimingSummaryText -Text ($doneMessage + "`r`n`r`n" + $timingText)
         return
     }
@@ -4048,53 +4046,63 @@ function Invoke-SyncPipeline {
             -RemoteUrl $GitRepoUrl -Branch $GitBranch -GitHome $GitHome `
             -SkipPullIfDirty -ForceCheckout
         Sync-GitWorktreeToOrigin -GitExe $GitExe -RepoDir $GitRepo -Branch $GitBranch
-        $gitTiming = New-OpTiming -StartedAt $gitPrepStart -EndedAt (Get-Date)
-        Write-Log ("Получение из Git: {0}" -f (Format-ElapsedTime -Elapsed $gitTiming.Elapsed))
+        $fetchTiming = New-OpTiming -StartedAt $gitPrepStart -EndedAt (Get-Date)
+
+        $configTiming = $null
+        $extTiming = $null
+        $dbElapsed = [TimeSpan]::Zero
+        $didDb = $false
 
         if ($LoadMainConfig) {
-            $opStart = Get-Date
-            Invoke-1CLoad -Platform $PlatformPath -DBType $DBType -BasePath $InfobasePath `
+            $loaded = Invoke-1CLoad -Platform $PlatformPath -DBType $DBType -BasePath $InfobasePath `
                 -User $1CUser -Password $1CPassword -InputPath $ConfigExportPath `
                 -UpdateDB $UpdateInfobaseCfg -Dynamic $DynamicUpdateCfg -ProgressFrom 50
-            $configTiming = New-OpTiming -StartedAt $opStart -EndedAt (Get-Date)
-            Write-Log ("Загрузка конфигурации: {0}" -f (Format-ElapsedTime -Elapsed $configTiming.Elapsed))
+            $configTiming = New-OpTiming -Elapsed $loaded.LoadElapsed
+            if ($null -ne $loaded.DbElapsed) {
+                $didDb = $true
+                $dbElapsed += $loaded.DbElapsed
+            }
         }
 
         if ($LoadExtensionsFlag) {
-            $opStart = Get-Date
-            Invoke-LoadExtensionsPipeline -Platform $PlatformPath -DBType $DBType `
+            $loadedExt = Invoke-LoadExtensionsPipeline -Platform $PlatformPath -DBType $DBType `
                 -BasePath $InfobasePath -User $1CUser -Password $1CPassword `
                 -RepoDir $GitRepo -SelectManually $LoadSelectManually `
                 -ExcludePrefix $ExtensionExcludePrefix `
                 -UpdateDB $UpdateInfobaseCfg -Dynamic $DynamicUpdateCfg
-            $extTiming = New-OpTiming -StartedAt $opStart -EndedAt (Get-Date)
-            Write-Log ("Загрузка расширений: {0}" -f (Format-ElapsedTime -Elapsed $extTiming.Elapsed))
+            if ($loadedExt) {
+                $extTiming = New-OpTiming -Elapsed $loadedExt.LoadElapsed
+                if ($null -ne $loadedExt.DbElapsed) {
+                    $didDb = $true
+                    $dbElapsed += $loadedExt.DbElapsed
+                }
+            }
         }
+
+        $dbTiming = $null
+        if ($didDb) { $dbTiming = New-OpTiming -Elapsed $dbElapsed }
 
         Set-Status -Text "Загрузка в 1С завершена" -Percent 100
         Write-Log "Операция успешно завершена"
 
         $doneMessage = "Загрузка из Git в базу '$InfobasePath' завершена."
-        $timingText = Format-TimingSummary -ConfigTiming $configTiming `
-            -ExtensionsTiming $extTiming -GitTiming $gitTiming -Kind "Load"
-        foreach ($timingLine in ($timingText -split "`r`n")) {
-            if ($timingLine) { Write-Log $timingLine }
-        }
+        $timingText = Format-TimingSummary -StartedAt $runStarted -EndedAt (Get-Date) -Steps @(
+            (New-TimingStep -Name "Получение файлов из удалённого репозитория" -Timing $fetchTiming),
+            (New-TimingStep -Name "Загрузка основной конфигурации в 1С" -Timing $configTiming),
+            (New-TimingStep -Name "Загрузка расширений в 1С" -Timing $extTiming),
+            (New-TimingStep -Name "Обновление конфигурации БД" -Timing $dbTiming)
+        )
+        Write-TimingSummary -Text $timingText
         Set-TimingSummaryText -Text ($doneMessage + "`r`n`r`n" + $timingText)
         return
     }
 
     if ($doGitPrepare) {
-        $gitPrepStart = Get-Date
         Initialize-PortableGit -EmbeddedArchive $EmbeddedGit
         Initialize-GitIdentity -GitExe $GitExe -GitHome $GitHome
         Initialize-GitRepository -GitExe $GitExe -RepoDir $GitRepo `
             -RemoteUrl $GitRepoUrl -Branch $GitBranch -GitHome $GitHome `
             -SkipPullIfDirty:($Action -eq "git")
-        $gitPrepEnd = Get-Date
-        if ($doGitPublish) {
-            $gitTiming = New-OpTiming -StartedAt $gitPrepStart -EndedAt $gitPrepEnd
-        }
     }
     elseif ($doMain -or $doExt) {
         if (-not (Test-Path $GitRepo)) {
@@ -4102,13 +4110,15 @@ function Invoke-SyncPipeline {
         }
     }
 
+    $configTiming = $null
+    $extTiming = $null
+
     if ($doMain) {
         $opStart = Get-Date
         Invoke-1CExport -Platform $PlatformPath -DBType $DBType -BasePath $InfobasePath `
             -User $1CUser -Password $1CPassword -OutputPath $ConfigExportPath `
             -DumpMode $DumpMode -ProgressFrom 45 -ProgressTo 65
         $configTiming = New-OpTiming -StartedAt $opStart -EndedAt (Get-Date)
-        Write-Log ("Выгрузка конфигурации: {0}" -f (Format-ElapsedTime -Elapsed $configTiming.Elapsed))
     }
     elseif ($Action -eq "all") {
         Write-Log "Выгрузка основной конфигурации пропущена"
@@ -4121,7 +4131,6 @@ function Invoke-SyncPipeline {
             -RepoDir $GitRepo -SelectManually $SelectExtensionsManually `
             -ExcludePrefix $ExtensionExcludePrefix -DumpMode $DumpMode
         $extTiming = New-OpTiming -StartedAt $opStart -EndedAt (Get-Date)
-        Write-Log ("Выгрузка расширений: {0}" -f (Format-ElapsedTime -Elapsed $extTiming.Elapsed))
     }
     elseif ($Action -eq "all") {
         Write-Log "Выгрузка расширений отключена в настройках"
@@ -4130,19 +4139,9 @@ function Invoke-SyncPipeline {
     $publishResult = $null
     if ($doGitPublish) {
         Test-Cancelled
-        $opStart = Get-Date
         $publishResult = Invoke-GitPublish -GitExe $GitExe -RepoDir $GitRepo `
             -Branch $GitBranch -GitHome $GitHome -InfobasePath $InfobasePath `
             -AutoConfirm:$AutoConfirmGitPush
-        $opEnd = Get-Date
-        if ($gitTiming) {
-            $gitTiming = New-OpTiming -StartedAt $gitTiming.StartedAt -EndedAt $opEnd `
-                -Elapsed ($gitTiming.Elapsed + ($opEnd - $opStart))
-        }
-        else {
-            $gitTiming = New-OpTiming -StartedAt $opStart -EndedAt $opEnd
-        }
-        Write-Log ("Синхронизация с Git: {0}" -f (Format-ElapsedTime -Elapsed $gitTiming.Elapsed))
     }
 
     Set-Status -Text "Готово!" -Percent 100
@@ -4172,11 +4171,13 @@ function Invoke-SyncPipeline {
         }
     }
 
-    $timingText = Format-TimingSummary -ConfigTiming $configTiming `
-        -ExtensionsTiming $extTiming -GitTiming $gitTiming
-    foreach ($timingLine in ($timingText -split "`r`n")) {
-        if ($timingLine) { Write-Log $timingLine }
-    }
+    $timingText = Format-TimingSummary -StartedAt $runStarted -EndedAt (Get-Date) -Steps @(
+        (New-TimingStep -Name "Выгрузка основной конфигурации" -Timing $configTiming),
+        (New-TimingStep -Name "Выгрузка расширений" -Timing $extTiming),
+        (New-TimingStep -Name "Добавление изменений в индекс и коммит" -Timing $script:IndexCommitTiming),
+        (New-TimingStep -Name "Отправка в удалённый репозиторий" -Timing $script:RemotePushTiming)
+    )
+    Write-TimingSummary -Text $timingText
     Set-TimingSummaryText -Text ($doneMessage + "`r`n`r`n" + $timingText)
 }
 
