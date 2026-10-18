@@ -10,7 +10,7 @@ https://github.com/crabopal/1c-git-sync/releases/latest/download/1c-git-sync.zip
 
 Git на клиентском компьютере не нужен: в архиве уже есть `PortableGit-64-bit.7z.exe`. Распакуйте ZIP и запустите `1C Git Sync.exe` или `run.bat`. При первом запуске портативный Git распакуется в `workdir`.
 
-Кнопка **Обновить** внизу боковой колонки проверяет [Releases](https://github.com/crabopal/1c-git-sync/releases/latest), скачивает новый zip и перезапускает программу. Каталог `workdir` при этом не трогается.
+Кнопка **Обновить** внизу боковой колонки проверяет [Releases](https://github.com/crabopal/1c-git-sync/releases/latest), скачивает новый zip и перезапускает программу. Каталог `workdir` при этом не трогается. Скрипт, `run.bat`, иконка и PortableGit переносятся в папки `src` и `redist`; `1C Git Sync.exe` остаётся в корне.
 
 Раздел **Packages** на GitHub для этого не используется: там публикуют npm, NuGet и Docker-образы. Архив приложения — это **Releases**.
 

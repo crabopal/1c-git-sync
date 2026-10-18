@@ -30,6 +30,8 @@ jobs:
             exit 1
           fi
           mkdir -p dist/1c-git-sync
+          # Архив остаётся плоским: обновление 2.0 копирует папку, где лежит My1CApp.ps1.
+          # Уже установленная копия раскладывает файлы в src и redist после запуска.
           cp src/My1CApp.ps1 src/run.bat README.md src/app.ico "1C Git Sync.exe" redist/PortableGit-64-bit.7z.exe dist/1c-git-sync/
           TAG="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}"
           printf '%s\n' "${TAG#v}" > dist/1c-git-sync/VERSION

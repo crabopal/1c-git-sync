@@ -11,6 +11,109 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
+# Плоский архив (так его копирует обновление 1.12 и 2.0) раскладывается
+# в src и redist уже после замены файлов. Репозиторий этот шаг пропускает:
+# рядом со скриптом в src нет PortableGit-64-bit.7z.exe.
+function Get-InstallLayoutWorker {
+    return @'
+param([string]$Root, [int]$WaitPid)
+$ErrorActionPreference = "Stop"
+try {
+while ($WaitPid -and (Get-Process -Id $WaitPid -ErrorAction SilentlyContinue)) {
+    Start-Sleep -Milliseconds 400
+}
+
+function Move-LayoutFile {
+    param([string]$From, [string]$ToDir)
+    if (-not (Test-Path -LiteralPath $From)) { return }
+    if (-not (Test-Path -LiteralPath $ToDir)) {
+        New-Item -ItemType Directory -Path $ToDir -Force | Out-Null
+    }
+    $dest = Join-Path $ToDir (Split-Path -Leaf $From)
+    for ($i = 0; $i -lt 15; $i++) {
+        try {
+            if (Test-Path -LiteralPath $dest) {
+                Remove-Item -LiteralPath $dest -Force -ErrorAction Stop
+            }
+            Move-Item -LiteralPath $From -Destination $dest -ErrorAction Stop
+            return
+        }
+        catch {
+            Start-Sleep -Milliseconds 400
+        }
+    }
+    throw "Не удалось перенести $From"
+}
+
+$src = Join-Path $Root "src"
+$redist = Join-Path $Root "redist"
+Move-LayoutFile -From (Join-Path $Root "My1CApp.ps1") -ToDir $src
+Move-LayoutFile -From (Join-Path $Root "run.bat") -ToDir $src
+Move-LayoutFile -From (Join-Path $Root "app.ico") -ToDir $src
+Move-LayoutFile -From (Join-Path $Root "PortableGit-64-bit.7z.exe") -ToDir $redist
+
+$logDir = Join-Path $Root "workdir"
+if (-not (Test-Path -LiteralPath $logDir)) {
+    New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+}
+$line = "[{0}] [INFO] Файлы программы разложены по папкам src и redist" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+Add-Content -LiteralPath (Join-Path $logDir "app.log") -Value $line -Encoding UTF8
+
+$exe = Join-Path $Root "1C Git Sync.exe"
+$bat = Join-Path $src "run.bat"
+if (Test-Path -LiteralPath $exe) {
+    Start-Process -FilePath $exe -WorkingDirectory $Root | Out-Null
+}
+elseif (Test-Path -LiteralPath $bat) {
+    Start-Process -FilePath $bat -WorkingDirectory $Root | Out-Null
+}
+Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
+}
+catch {
+    try {
+        Add-Type -AssemblyName System.Windows.Forms
+        [System.Windows.Forms.MessageBox]::Show(
+            "Не удалось разложить файлы программы по папкам src и redist.`r`n`r`n$_",
+            "1C Git Sync",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+    }
+    catch { }
+    exit 1
+}
+'@
+}
+
+function Start-InstallLayoutMigration {
+    param([string]$Root)
+    if (-not $Root) { return }
+    if (Test-Path -LiteralPath (Join-Path $Root ".git")) { return }
+    $git = Join-Path $Root "PortableGit-64-bit.7z.exe"
+    $ps1 = Join-Path $Root "My1CApp.ps1"
+    if (-not (Test-Path -LiteralPath $git)) { return }
+    if (-not (Test-Path -LiteralPath $ps1)) { return }
+
+    $work = Join-Path $Root "workdir"
+    if (-not (Test-Path -LiteralPath $work)) {
+        New-Item -ItemType Directory -Path $work -Force | Out-Null
+    }
+    $helper = Join-Path $work "finish-layout.ps1"
+    $utf8 = New-Object System.Text.UTF8Encoding $true
+    [System.IO.File]::WriteAllText($helper, (Get-InstallLayoutWorker), $utf8)
+    $arg = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$helper`" -Root `"$Root`" -WaitPid $PID"
+    Start-Process -FilePath "powershell.exe" -ArgumentList $arg -WindowStyle Hidden | Out-Null
+    exit 0
+}
+
+$layoutRoot = $PSScriptRoot
+if (-not $layoutRoot -and $PSCommandPath) {
+    $layoutRoot = Split-Path -Parent $PSCommandPath
+}
+elseif (-not $layoutRoot -and $MyInvocation.MyCommand.Path) {
+    $layoutRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+}
+Start-InstallLayoutMigration -Root $layoutRoot
+
 # === ПУТИ ПРИЛОЖЕНИЯ ===
 if (-not $AppDir -or -not (Test-Path $AppDir)) {
     $AppDir = $null
@@ -32,8 +135,8 @@ if (-not $AppDir -or -not (Test-Path $AppDir)) {
 $AppDir = $AppDir.TrimEnd('\', '/')
 $ScriptDir = $AppDir
 
-# В репозитории скрипт лежит в src, а рабочий каталог и VERSION — в корне.
-# В установленном архиве все файлы лежат в одной папке, и AppDir не меняется.
+# Скрипт лежит в src, а workdir, VERSION и exe — в корне.
+# Так устроен репозиторий и установка после раскладки файлов.
 $devRoot = Split-Path $ScriptDir -Parent
 $devGit = Join-Path $devRoot "redist\PortableGit-64-bit.7z.exe"
 if (((Split-Path $ScriptDir -Leaf) -eq "src") -and (Test-Path -LiteralPath $devGit)) {
@@ -51,7 +154,7 @@ $GitHome          = Join-Path $WorkDir "git-home"
 $GitRepo          = Join-Path $WorkDir "repo"
 $ConfigExportPath = Join-Path $GitRepo "Config"
 $ConfigPath       = Join-Path $WorkDir "config.json"
-$AppVersion       = "2.0.0"
+$AppVersion       = "2.0.1"
 $AppGitHubRepo    = "crabopal/1c-git-sync"
 
 # === ГЛОБАЛЬНЫЙ КОНТЕКСТ ПРОГРЕССА ===
@@ -1089,8 +1192,17 @@ function Find-UpdatePayloadDir {
     if (Test-Path -LiteralPath $direct) { return $Root }
     $found = Get-ChildItem -LiteralPath $Root -Recurse -Filter "My1CApp.ps1" -File -ErrorAction SilentlyContinue |
         Select-Object -First 1
-    if ($found) { return $found.DirectoryName }
-    throw "В архиве обновления нет My1CApp.ps1"
+    if (-not $found) { throw "В архиве обновления нет My1CApp.ps1" }
+    $dir = $found.DirectoryName
+    # Архив новой раскладки: My1CApp.ps1 в src, рядом exe и redist.
+    # Копировать нужно родителя, иначе обновление заберёт только src.
+    if ((Split-Path $dir -Leaf) -eq "src") {
+        $parent = Split-Path $dir -Parent
+        if ($parent -and (Test-Path -LiteralPath (Join-Path $parent "src\My1CApp.ps1"))) {
+            return $parent
+        }
+    }
+    return $dir
 }
 
 function Start-AppSelfUpdate {
@@ -1130,7 +1242,7 @@ function Start-AppSelfUpdate {
     }
 
     $answer = [System.Windows.Forms.MessageBox]::Show(
-        "Доступна версия $($rel.Version) (сейчас $currentText).`r`n`r`nСкачать релиз и перезапустить программу?`r`nКаталог workdir не изменяется.",
+        "Доступна версия $($rel.Version) (сейчас $currentText).`r`n`r`nСкачать релиз и перезапустить программу?`r`nКаталог workdir не изменяется. Скрипт, run.bat, иконка и PortableGit переносятся в папки src и redist.",
         "Обновление 1C Git Sync",
         [System.Windows.Forms.MessageBoxButtons]::YesNo,
         [System.Windows.Forms.MessageBoxIcon]::Question)
@@ -1164,6 +1276,10 @@ function Start-AppSelfUpdate {
         $payload = Find-UpdatePayloadDir -Root $stageRoot
         Write-Log "Пакет обновления: $payload"
 
+        $utf8 = New-Object System.Text.UTF8Encoding $true
+        $layoutPs1 = Join-Path $WorkDir "finish-layout.ps1"
+        [System.IO.File]::WriteAllText($layoutPs1, (Get-InstallLayoutWorker), $utf8)
+
         $updPs1 = Join-Path $WorkDir "apply-update.ps1"
         $updText = @"
 param([string]`$Src, [string]`$Dst, [int]`$WaitPid)
@@ -1171,9 +1287,38 @@ while (Get-Process -Id `$WaitPid -ErrorAction SilentlyContinue) {
     Start-Sleep -Seconds 1
 }
 Copy-Item -Path (Join-Path `$Src '*') -Destination `$Dst -Recurse -Force
-`$run = Join-Path `$Dst 'run.bat'
-if (Test-Path -LiteralPath `$run) {
-    Start-Process -FilePath `$run -WorkingDirectory `$Dst
+`$layout = Join-Path `$Dst 'workdir\finish-layout.ps1'
+if (Test-Path -LiteralPath `$layout) {
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `$layout -Root `$Dst -WaitPid 0
+}
+else {
+    `$srcDir = Join-Path `$Dst 'src'
+    `$redistDir = Join-Path `$Dst 'redist'
+    foreach (`$name in @('My1CApp.ps1', 'run.bat', 'app.ico')) {
+        `$from = Join-Path `$Dst `$name
+        if (Test-Path -LiteralPath `$from) {
+            if (-not (Test-Path -LiteralPath `$srcDir)) { New-Item -ItemType Directory -Path `$srcDir -Force | Out-Null }
+            `$dest = Join-Path `$srcDir `$name
+            if (Test-Path -LiteralPath `$dest) { Remove-Item -LiteralPath `$dest -Force }
+            Move-Item -LiteralPath `$from -Destination `$dest
+        }
+    }
+    `$gitFrom = Join-Path `$Dst 'PortableGit-64-bit.7z.exe'
+    if (Test-Path -LiteralPath `$gitFrom) {
+        if (-not (Test-Path -LiteralPath `$redistDir)) { New-Item -ItemType Directory -Path `$redistDir -Force | Out-Null }
+        `$gitTo = Join-Path `$redistDir 'PortableGit-64-bit.7z.exe'
+        if (Test-Path -LiteralPath `$gitTo) { Remove-Item -LiteralPath `$gitTo -Force }
+        Move-Item -LiteralPath `$gitFrom -Destination `$gitTo
+    }
+    `$exe = Join-Path `$Dst '1C Git Sync.exe'
+    `$bat = Join-Path `$Dst 'src\run.bat'
+    if (-not (Test-Path -LiteralPath `$bat)) { `$bat = Join-Path `$Dst 'run.bat' }
+    if (Test-Path -LiteralPath `$exe) {
+        Start-Process -FilePath `$exe -WorkingDirectory `$Dst | Out-Null
+    }
+    elseif (Test-Path -LiteralPath `$bat) {
+        Start-Process -FilePath `$bat -WorkingDirectory `$Dst | Out-Null
+    }
 }
 `$stage = Split-Path -Parent `$Src
 if (`$stage -and ((Split-Path `$stage -Leaf) -eq 'update-staging')) {
@@ -1185,7 +1330,6 @@ if (Test-Path -LiteralPath `$zip) {
 }
 Remove-Item -LiteralPath `$PSCommandPath -Force -ErrorAction SilentlyContinue
 "@
-        $utf8 = New-Object System.Text.UTF8Encoding $true
         [System.IO.File]::WriteAllText($updPs1, $updText, $utf8)
 
         $arg = "-NoProfile -ExecutionPolicy Bypass -File `"$updPs1`" `"$payload`" `"$AppDir`" $PID"
