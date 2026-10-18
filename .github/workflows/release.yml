@@ -21,12 +21,16 @@ jobs:
 
       - name: Build zip
         run: |
-          if [ ! -f PortableGit-64-bit.7z.exe ]; then
-            echo "PortableGit-64-bit.7z.exe is missing from the repository" >&2
+          if [ ! -f redist/PortableGit-64-bit.7z.exe ]; then
+            echo "redist/PortableGit-64-bit.7z.exe is missing from the repository" >&2
+            exit 1
+          fi
+          if [ ! -f "1C Git Sync.exe" ]; then
+            echo "1C Git Sync.exe is missing from the repository" >&2
             exit 1
           fi
           mkdir -p dist/1c-git-sync
-          cp My1CApp.ps1 run.bat README.md PortableGit-64-bit.7z.exe dist/1c-git-sync/
+          cp src/My1CApp.ps1 src/run.bat README.md src/app.ico "1C Git Sync.exe" redist/PortableGit-64-bit.7z.exe dist/1c-git-sync/
           TAG="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}"
           printf '%s\n' "${TAG#v}" > dist/1c-git-sync/VERSION
           cd dist
