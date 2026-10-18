@@ -154,7 +154,7 @@ $GitHome          = Join-Path $WorkDir "git-home"
 $GitRepo          = Join-Path $WorkDir "repo"
 $ConfigExportPath = Join-Path $GitRepo "Config"
 $ConfigPath       = Join-Path $WorkDir "config.json"
-$AppVersion       = "2.0.2"
+$AppVersion       = "2.0.3"
 $AppGitHubRepo    = "crabopal/1c-git-sync"
 
 # === ГЛОБАЛЬНЫЙ КОНТЕКСТ ПРОГРЕССА ===
@@ -274,7 +274,7 @@ function Stop-TrackedProcess {
 function Wait-CancellableProcess {
     param(
         [Parameter(Mandatory = $true)][System.Diagnostics.Process]$Process,
-        [int]$PollMs = 300
+        [int]$PollMs = 40
     )
 
     $script:CurrentProcess = $Process
@@ -343,7 +343,7 @@ function Invoke-CancellableProcess {
     $StdoutTask = $Proc.StandardOutput.ReadToEndAsync()
     $StderrTask = $Proc.StandardError.ReadToEndAsync()
 
-    while (-not $Proc.WaitForExit(300)) {
+    while (-not $Proc.WaitForExit(40)) {
         [System.Windows.Forms.Application]::DoEvents()
         if ($script:CancelRequested) {
             Stop-TrackedProcess -Proc $Proc
@@ -1438,12 +1438,12 @@ function Show-SettingsForm {
 
     $pnlLog = New-Object System.Windows.Forms.Panel
     $pnlLog.Dock = "Bottom"
-    $pnlLog.Height = 180
+    $pnlLog.Height = 190
     $pnlLog.BackColor = $c.LogBg
 
     $pnlLogBar = New-Object System.Windows.Forms.Panel
     $pnlLogBar.Dock = "Top"
-    $pnlLogBar.Height = 58
+    $pnlLogBar.Height = 68
     $pnlLogBar.BackColor = $c.Window
     $pnlLogBar.Padding = New-Object System.Windows.Forms.Padding(16, 6, 12, 4)
 
@@ -1471,11 +1471,10 @@ function Show-SettingsForm {
 
     $bar = New-Object System.Windows.Forms.ProgressBar
     $bar.Dock = "Bottom"
-    $bar.Height = 8
+    $bar.Height = 18
     $bar.Minimum = 0
     $bar.Maximum = 100
     $bar.Value = 0
-    $bar.Style = "Continuous"
     $pnlLogBar.Controls.Add($bar)
 
     $txtLog = New-Object System.Windows.Forms.TextBox
