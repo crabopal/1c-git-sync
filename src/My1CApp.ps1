@@ -154,7 +154,7 @@ $GitHome          = Join-Path $WorkDir "git-home"
 $GitRepo          = Join-Path $WorkDir "repo"
 $ConfigExportPath = Join-Path $GitRepo "Config"
 $ConfigPath       = Join-Path $WorkDir "config.json"
-$AppVersion       = "2.0.3"
+$AppVersion       = "2.1.0"
 $AppGitHubRepo    = "crabopal/1c-git-sync"
 
 # === ГЛОБАЛЬНЫЙ КОНТЕКСТ ПРОГРЕССА ===
@@ -761,6 +761,8 @@ function Get-DefaultConfig {
         LoadSelectExtensionsManually = $false
         UpdateInfobaseCfg          = $true
         DynamicUpdateCfg           = $false
+        CfeUpdateFirst             = $true
+        CfeSelectManually          = $false
     }
 }
 
@@ -1610,10 +1612,26 @@ function Show-SettingsForm {
     $chkDynamic.Enabled = $chkUpdateDB.Checked
     $chkUpdateDB.Add_CheckedChanged({ $chkDynamic.Enabled = $chkUpdateDB.Checked })
 
+    $cfeCard = New-UiCard -Stack $stackLoad -Title "Сборка .cfe (папка workdir\cfe)" -BodyHeight 68
+    $chkCfeUpdate = New-UiCheckBox -Parent $cfeCard.Body -Text "Сначала обновить из Git" -Top 4 -Checked ([bool]$Existing.CfeUpdateFirst)
+    $tip.SetToolTip($chkCfeUpdate, "Перед сборкой получить новые коммиты ветки из удалённого репозитория")
+    $chkCfeManual = New-UiCheckBox -Parent $cfeCard.Body -Text "Выбрать расширения вручную (из папки Git)" -Top 36 -Checked ([bool]$Existing.CfeSelectManually)
+    $tip.SetToolTip($chkCfeManual, "Без флажка собираются все расширения, кроме тех, имя которых начинается с префикса исключения (вкладка «Выгрузка»)")
+
     $btnLoad = New-UiButton -Parent $barLoad -Text "Загрузить в 1С" -Width 180 -Kind Primary
     $btnLoad.Left = 16
     $btnLoad.Top = 14
     $tip.SetToolTip($btnLoad, "Заменяет конфигурацию в базе файлами из Git по флажкам на этой странице")
+
+    $btnPull = New-UiButton -Parent $barLoad -Text "Обновить из Git" -Width 160 -Kind Secondary
+    $btnPull.Left = 208
+    $btnPull.Top = 14
+    $tip.SetToolTip($btnPull, "Получает новые коммиты ветки из удалённого репозитория в локальный клон. В 1С ничего не загружает")
+
+    $btnCfe = New-UiButton -Parent $barLoad -Text "Собрать .cfe" -Width 150 -Kind Secondary
+    $btnCfe.Left = 380
+    $btnCfe.Top = 14
+    $tip.SetToolTip($btnCfe, "Собирает .cfe из файлов расширений репозитория во временной базе. Файл сохраняется в workdir\cfe. Базы 1С не затрагиваются")
 
     # --- Настройки ---
     $stackSettings = New-UiStack -Parent $pageSettings
@@ -1920,6 +1938,8 @@ function Show-SettingsForm {
         ChkLoadManual = $chkLoadManual
         ChkUpdateDB   = $chkUpdateDB
         ChkDynamic    = $chkDynamic
+        ChkCfeUpdate  = $chkCfeUpdate
+        ChkCfeManual  = $chkCfeManual
     }
 
     $script:ProgressForm         = $form
@@ -1929,13 +1949,15 @@ function Show-SettingsForm {
     $script:ProgressCancelButton = $btnCancelOp
     $script:TimingBox            = $null
     $script:MainTabs             = $pnlPages
-    $script:ActionButtons        = @($btnDump, $btnGit, $btnPushOnly, $btnLoad, $btnCleanClone, $btnUpdate, $btnNavDump, $btnNavLoad, $btnNavSettings)
+    $script:ActionButtons        = @($btnDump, $btnGit, $btnPushOnly, $btnLoad, $btnPull, $btnCfe, $btnCleanClone, $btnUpdate, $btnNavDump, $btnNavLoad, $btnNavSettings)
     $script:SetLogExpanded       = { }
 
     $btnDump.Add_Click({ Start-UiAction -Action "all" })
     $btnGit.Add_Click({ Start-UiAction -Action "git" })
     $btnPushOnly.Add_Click({ Start-UiAction -Action "push" })
     $btnLoad.Add_Click({ Start-UiAction -Action "load" })
+    $btnPull.Add_Click({ Start-UiAction -Action "pull" })
+    $btnCfe.Add_Click({ Start-UiAction -Action "cfe" })
     $btnCleanClone.Add_Click({ Start-UiAction -Action "reclone" })
     $btnUpdate.Add_Click({ Start-AppSelfUpdate -Form $form })
 
@@ -2030,6 +2052,8 @@ function Read-UiConfig {
         LoadSelectExtensionsManually = [bool]$ui.ChkLoadManual.Checked
         UpdateInfobaseCfg        = [bool]$ui.ChkUpdateDB.Checked
         DynamicUpdateCfg         = [bool]$ui.ChkDynamic.Checked
+        CfeUpdateFirst           = [bool]$ui.ChkCfeUpdate.Checked
+        CfeSelectManually        = [bool]$ui.ChkCfeManual.Checked
     }
 }
 
@@ -2053,6 +2077,8 @@ function Save-AppConfig {
         LoadSelectExtensionsManually = $Config.LoadSelectExtensionsManually
         UpdateInfobaseCfg        = $Config.UpdateInfobaseCfg
         DynamicUpdateCfg         = $Config.DynamicUpdateCfg
+        CfeUpdateFirst           = $Config.CfeUpdateFirst
+        CfeSelectManually        = $Config.CfeSelectManually
     }
     $saved | ConvertTo-Json | Set-Content -Path $ConfigPath -Encoding UTF8
 }
@@ -2146,9 +2172,11 @@ function Start-UiAction {
         Write-Log "КРИТИЧЕСКАЯ ОШИБКА: $_" "ERROR"
         Set-Status -Text "Ошибка: $_" -Percent 100
         Set-TimingSummaryText -Text "Ошибка: $_"
+        $errorTitle = "1C Git Sync"
+        if ("$_" -match 'Выгрузка записана в формате') { $errorTitle = "Смените платформу 1С" }
         [System.Windows.Forms.MessageBox]::Show(
             "Ошибка:`r`n`r`n$_`r`n`r`nПодробности в журнале.",
-            "1C Git Sync",
+            $errorTitle,
             [System.Windows.Forms.MessageBoxButtons]::OK,
             [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
     }
@@ -2173,7 +2201,17 @@ function Test-Config {
     if (-not $action) { $action = "all" }
 
     $need1C = $action -in @("all", "config", "extensions", "load")
-    $needGit = $action -in @("all", "git", "push", "reclone", "load")
+    $needGit = $action -in @("all", "git", "push", "pull", "reclone", "load")
+    if ($action -eq "cfe" -and $Config.CfeUpdateFirst) { $needGit = $true }
+
+    if ($action -eq "cfe") {
+        if (-not $Config.PlatformPath) {
+            $errors += "Не указан путь к 1cv8.exe (рядом с ним должен быть ibcmd.exe)"
+        }
+        elseif (-not (Test-Path $Config.PlatformPath)) {
+            $errors += "Файл 1cv8.exe не найден: $($Config.PlatformPath)"
+        }
+    }
 
     if ($need1C) {
         if (-not $Config.PlatformPath) {
@@ -2870,6 +2908,177 @@ function Sync-GitWorktreeToOrigin {
     Write-Log "Рабочее дерево совпадает с origin/$Branch"
 }
 
+function Get-GitBranchState {
+    param([string]$GitExe, [string]$RepoDir, [string]$Branch)
+
+    $state = [PSCustomObject]@{
+        Current     = ""
+        LocalExists = $false
+        Dirty       = 0
+        Ahead       = 0
+        Behind      = 0
+    }
+
+    $cur = Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
+        -GitArgs @("rev-parse", "--abbrev-ref", "HEAD") -IgnoreExitCode -Quiet
+    if ($cur.ExitCode -eq 0 -and $cur.Stdout) { $state.Current = $cur.Stdout.Trim() }
+
+    $loc = Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
+        -GitArgs @("rev-parse", "--verify", "-q", "refs/heads/$Branch") -IgnoreExitCode -Quiet
+    $state.LocalExists = ($loc.ExitCode -eq 0)
+
+    $st = Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
+        -GitArgs @("status", "--porcelain") -IgnoreExitCode -Quiet
+    if ($st.Stdout) {
+        $state.Dirty = @($st.Stdout -split "`r?`n" | Where-Object { $_.Trim() }).Count
+    }
+
+    if ($state.LocalExists) {
+        $ahead = Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
+            -GitArgs @("rev-list", "--count", "origin/${Branch}..${Branch}") -IgnoreExitCode -Quiet
+        $behind = Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
+            -GitArgs @("rev-list", "--count", "${Branch}..origin/${Branch}") -IgnoreExitCode -Quiet
+        $n = 0
+        if ($ahead.Stdout -and [int]::TryParse($ahead.Stdout.Trim(), [ref]$n)) { $state.Ahead = $n }
+        $n = 0
+        if ($behind.Stdout -and [int]::TryParse($behind.Stdout.Trim(), [ref]$n)) { $state.Behind = $n }
+    }
+    else {
+        # Локальной ветки нет: её нужно создать из origin.
+        $state.Behind = 1
+    }
+    return $state
+}
+
+function Update-GitBranchFromOrigin {
+    param(
+        [string]$GitExe,
+        [string]$RepoDir,
+        [string]$RemoteUrl,
+        [string]$Branch,
+        [string]$GitHome
+    )
+
+    if (-not $Branch) { $Branch = "main" }
+    Test-Cancelled
+    $env:HOME = $GitHome
+    $env:GIT_TERMINAL_PROMPT = $null
+    $env:GIT_ASKPASS = $null
+    $env:GCM_INTERACTIVE = $null
+
+    $remoteRefArgs = @("rev-parse", "--verify", "-q", "refs/remotes/origin/$Branch")
+
+    if (-not (Test-Path (Join-Path $RepoDir ".git"))) {
+        Initialize-GitRepository -GitExe $GitExe -RepoDir $RepoDir `
+            -RemoteUrl $RemoteUrl -Branch $Branch -GitHome $GitHome -ForceCheckout | Out-Null
+        $remote = Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
+            -GitArgs $remoteRefArgs -IgnoreExitCode -Quiet
+        if ($remote.ExitCode -ne 0) { throw "На origin нет ветки '$Branch'." }
+        Write-Log "Локальный клон создан, ветка '$Branch' получена"
+        return [PSCustomObject]@{
+            Result  = "cloned"
+            Message = "Локальный клон создан, ветка '$Branch' получена из origin."
+        }
+    }
+
+    Sync-GitOriginUrl -GitExe $GitExe -RepoDir $RepoDir -RemoteUrl $RemoteUrl | Out-Null
+    Initialize-GitLargeRepoConfig -GitExe $GitExe -RepoDir $RepoDir | Out-Null
+
+    Set-Status -Text "Получение изменений из origin..." -Percent 30
+    Write-Log "Получение изменений из origin"
+    Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir -GitArgs @("fetch", "origin") | Out-Null
+    Test-Cancelled
+
+    $remote = Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
+        -GitArgs $remoteRefArgs -IgnoreExitCode -Quiet
+    if ($remote.ExitCode -ne 0) { throw "На origin нет ветки '$Branch'." }
+
+    if (-not (Test-GitHeadExists -GitExe $GitExe -RepoDir $RepoDir)) {
+        Write-Log "Локальных коммитов нет — берём origin/$Branch"
+        Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
+            -GitArgs @("-c", "core.longpaths=true", "checkout", "-f", "-B", $Branch, "origin/$Branch") | Out-Null
+        return [PSCustomObject]@{
+            Result  = "updated"
+            Message = "Ветка '$Branch' получена из origin."
+        }
+    }
+
+    Set-Status -Text "Сравнение с origin/$Branch..." -Percent 60
+    $state = Get-GitBranchState -GitExe $GitExe -RepoDir $RepoDir -Branch $Branch
+    Write-Log ("Ветка '{0}': сейчас '{1}', файлов с изменениями {2}, не отправлено коммитов {3}, новых на origin {4}" -f `
+        $Branch, $state.Current, $state.Dirty, $state.Ahead, $(if ($state.LocalExists) { $state.Behind } else { "ветка не создана локально" }))
+
+    $needSwitch = ($state.Current -ne $Branch)
+    $needPull = ($state.Behind -gt 0)
+
+    if (-not $needSwitch -and -not $needPull) {
+        $msg = "Ветка '$Branch' уже актуальна."
+        if ($state.Ahead -gt 0) { $msg += " Локально не отправлено коммитов: $($state.Ahead)." }
+        if ($state.Dirty -gt 0) { $msg += " Есть файлов с локальными изменениями: $($state.Dirty)." }
+        return [PSCustomObject]@{ Result = "uptodate"; Message = $msg }
+    }
+
+    $conflict = (($state.Dirty -gt 0) -and ($needPull -or $needSwitch)) -or
+        (($state.Ahead -gt 0) -and ($state.Behind -gt 0))
+
+    if ($conflict) {
+        $lines = New-Object System.Collections.Generic.List[string]
+        $lines.Add("Ветку '$Branch' нельзя просто обновить из origin:")
+        $lines.Add("")
+        if ($needSwitch) { $lines.Add("Сейчас в клоне выбрана ветка '$($state.Current)'.") }
+        if ($state.Dirty -gt 0) { $lines.Add("Файлов с локальными изменениями: $($state.Dirty)") }
+        if ($state.Ahead -gt 0) { $lines.Add("Не отправлено коммитов: $($state.Ahead)") }
+        if ($state.LocalExists -and $state.Behind -gt 0) { $lines.Add("Новых коммитов на origin: $($state.Behind)") }
+        $lines.Add("")
+        $lines.Add("Привести ветку к origin/$Branch? Локальные изменения и неотправленные коммиты будут потеряны.")
+
+        Set-ProgressCancelEnabled -Enabled $false
+        $answer = [System.Windows.Forms.MessageBox]::Show(
+            ($lines -join "`r`n"),
+            "Обновить из Git",
+            [System.Windows.Forms.MessageBoxButtons]::YesNo,
+            [System.Windows.Forms.MessageBoxIcon]::Warning,
+            [System.Windows.Forms.MessageBoxDefaultButton]::Button2)
+        Set-ProgressCancelEnabled -Enabled $true
+        Test-Cancelled
+
+        if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) {
+            Write-Log "Обновление отменено: локальные изменения оставлены"
+            throw (New-Object System.OperationCanceledException("Операция отменена пользователем"))
+        }
+
+        Sync-GitWorktreeToOrigin -GitExe $GitExe -RepoDir $RepoDir -Branch $Branch | Out-Null
+        return [PSCustomObject]@{
+            Result  = "reset"
+            Message = "Ветка '$Branch' приведена к origin/$Branch. Локальные изменения и неотправленные коммиты удалены."
+        }
+    }
+
+    Set-Status -Text "Обновление ветки $Branch..." -Percent 80
+    if ($needSwitch -and -not $state.LocalExists) {
+        Write-Log "Создаём локальную ветку '$Branch' из origin/$Branch"
+        Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
+            -GitArgs @("-c", "core.longpaths=true", "checkout", "-B", $Branch, "origin/$Branch") | Out-Null
+    }
+    else {
+        if ($needSwitch) {
+            Write-Log "Переключаемся на ветку '$Branch'"
+            Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
+                -GitArgs @("-c", "core.longpaths=true", "checkout", $Branch) | Out-Null
+        }
+        if ($needPull) {
+            Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
+                -GitArgs @("-c", "core.longpaths=true", "merge", "--ff-only", "origin/$Branch") | Out-Null
+        }
+    }
+
+    $msg = "Ветка '$Branch' обновлена."
+    if ($state.LocalExists -and $state.Behind -gt 0) { $msg += " Получено коммитов: $($state.Behind)." }
+    if ($needSwitch) { $msg += " Клон переключён на эту ветку." }
+    if ($state.Ahead -gt 0) { $msg += " Локально не отправлено коммитов: $($state.Ahead)." }
+    return [PSCustomObject]@{ Result = "updated"; Message = $msg }
+}
+
 # === ПУБЛИКАЦИЯ В GIT ===
 function Ensure-DumpGitIgnore {
     param([string]$RepoDir)
@@ -3349,6 +3558,93 @@ function Exit-ShortDumpPath {
     & $substExe "$($Info.Drive):" /d 2>&1 | Out-Null
 }
 
+function Compare-VersionParts {
+    param([string]$Left, [string]$Right)
+    $a = @($Left -split '\.' | ForEach-Object { [int]$_ })
+    $b = @($Right -split '\.' | ForEach-Object { [int]$_ })
+    $count = [Math]::Max($a.Count, $b.Count)
+    for ($i = 0; $i -lt $count; $i++) {
+        $av = 0
+        $bv = 0
+        if ($i -lt $a.Count) { $av = $a[$i] }
+        if ($i -lt $b.Count) { $bv = $b[$i] }
+        if ($av -lt $bv) { return -1 }
+        if ($av -gt $bv) { return 1 }
+    }
+    return 0
+}
+
+function Get-DumpFormatPlatformName {
+    param([string]$FormatVersion)
+    # Версия формата выгрузки растёт вместе с релизом платформы.
+    # Загрузка возможна только платформой не старше этого формата.
+    $ladder = @(
+        @{ Format = "1.0"; Platform = "8.3.6" },
+        @{ Format = "2.0"; Platform = "8.3.7" },
+        @{ Format = "2.1"; Platform = "8.3.8" },
+        @{ Format = "2.2"; Platform = "8.3.9" },
+        @{ Format = "2.3"; Platform = "8.3.9" },
+        @{ Format = "2.4"; Platform = "8.3.10" },
+        @{ Format = "2.5"; Platform = "8.3.11" },
+        @{ Format = "2.6"; Platform = "8.3.12" },
+        @{ Format = "2.7"; Platform = "8.3.13" },
+        @{ Format = "2.8"; Platform = "8.3.14" },
+        @{ Format = "2.9"; Platform = "8.3.15" },
+        @{ Format = "2.9.1"; Platform = "8.3.16" },
+        @{ Format = "2.10"; Platform = "8.3.17" },
+        @{ Format = "2.11"; Platform = "8.3.18" },
+        @{ Format = "2.12"; Platform = "8.3.19" },
+        @{ Format = "2.13"; Platform = "8.3.20" },
+        @{ Format = "2.14"; Platform = "8.3.21" },
+        @{ Format = "2.15"; Platform = "8.3.22" },
+        @{ Format = "2.16"; Platform = "8.3.23" },
+        @{ Format = "2.17"; Platform = "8.3.24" },
+        @{ Format = "2.18"; Platform = "8.3.25" },
+        @{ Format = "2.19"; Platform = "8.3.26" },
+        @{ Format = "2.20"; Platform = "8.3.27" },
+        @{ Format = "2.21"; Platform = "8.5.1" }
+    )
+    foreach ($row in $ladder) {
+        if ((Compare-VersionParts -Left $row.Format -Right $FormatVersion) -ge 0) {
+            return [string]$row.Platform
+        }
+    }
+    return $null
+}
+
+function Get-1CPlatformVersionLabel {
+    param([string]$PlatformPath)
+    if ($PlatformPath -match '\\(\d+\.\d+\.\d+(?:\.\d+)?)\\') {
+        return $Matches[1]
+    }
+    return ""
+}
+
+function Get-UnknownDumpFormatMessage {
+    param([string]$LogText, [string]$PlatformPath)
+    if ($LogText -notmatch 'Неизвестная версия формата\s+(\d+(?:\.\d+)*)') { return $null }
+
+    $format = $Matches[1]
+    $needed = Get-DumpFormatPlatformName -FormatVersion $format
+    $current = Get-1CPlatformVersionLabel -PlatformPath $PlatformPath
+    $lines = New-Object System.Collections.Generic.List[string]
+    $lines.Add("Выгрузка записана в формате $format. Выбранная платформа его не понимает.")
+    if ($needed) {
+        $lines.Add("Нужна платформа $needed или новее.")
+    }
+    else {
+        $lines.Add("Нужна платформа новее 8.5.1.")
+    }
+    if ($current) {
+        $lines.Add("Сейчас указан 1cv8.exe версии $current.")
+    }
+    elseif ($PlatformPath) {
+        $lines.Add("Сейчас указан: $PlatformPath")
+    }
+    $lines.Add("В настройках выберите подходящий 1cv8.exe либо заново выгрузите конфигурацию той платформой, которой будете загружать.")
+    return ($lines -join "`r`n")
+}
+
 function Test-1CLogIsFatal {
     param([string]$LogText)
     if (-not $LogText) { return $true }
@@ -3413,6 +3709,8 @@ function Invoke-1CDesigner {
     }
 
     if ($failed -and -not $IgnoreExitCode) {
+        $formatMsg = Get-UnknownDumpFormatMessage -LogText $logText -PlatformPath $Platform
+        if ($formatMsg) { throw $formatMsg }
         $hint = $logText
         if (-not $hint) {
             $hint = "Конфигуратор завершился с кодом $exitCode без текста ошибки. Закройте базу в 1С (пользовательский режим и конфигуратор) и проверьте имя пользователя и пароль."
@@ -3520,7 +3818,7 @@ function Invoke-1CExport {
         }
         catch {
             $lastError = $_
-            if ($useUpdate) {
+            if ($useUpdate -and ("$lastError" -notmatch 'Выгрузка записана в формате')) {
                 Write-Log "Инкрементальная выгрузка не удалась: $lastError"
                 Write-Log "Повторяем как полную выгрузку"
                 $useUpdate = $false
@@ -3687,7 +3985,7 @@ function Invoke-1CLoad {
             throw
         }
         catch {
-            if ($useUpdate) {
+            if ($useUpdate -and ("$_" -notmatch 'Выгрузка записана в формате')) {
                 Write-Log "Инкрементальная загрузка не удалась: $_"
                 Write-Log "Повторяем как полную загрузку"
                 $useUpdate = $false
@@ -3733,6 +4031,62 @@ function Invoke-1CLoad {
     }
 }
 
+# Выбор расширений из папки Extensions репозитория: по префиксу или вручную в окне выбора.
+function Select-RepoExtensions {
+    param(
+        [string]$RepoDir,
+        [bool]$SelectManually,
+        [string]$ExcludePrefix,
+        [string]$PromptText,
+        [string]$AcceptText
+    )
+
+    $result = New-Object System.Collections.Generic.List[object]
+    $AllExtensions = Get-RepoExtensionInfos -RepoDir $RepoDir
+    if ($AllExtensions.Count -eq 0) {
+        Write-Log "В Git нет расширений с Configuration.xml (папка Extensions)"
+        Write-Output -NoEnumerate $result
+        return
+    }
+    Write-Log ("В Git найдено расширений: {0}" -f $AllExtensions.Count)
+
+    if ($SelectManually) {
+        Set-ProgressCancelEnabled -Enabled $false
+        $pickerNames = New-Object System.Collections.Generic.List[string]
+        for ($i = 0; $i -lt $AllExtensions.Count; $i++) {
+            [void]$pickerNames.Add([string]$AllExtensions[$i].FolderName)
+        }
+        $selected = @(Show-ExtensionPicker -Extensions $pickerNames.ToArray() -ExcludePrefix $ExcludePrefix `
+            -PromptText $PromptText -AcceptText $AcceptText)
+        Set-ProgressCancelEnabled -Enabled $true
+        Test-Cancelled
+        for ($i = 0; $i -lt $AllExtensions.Count; $i++) {
+            $ext = $AllExtensions[$i]
+            if ($selected -contains [string]$ext.FolderName) { [void]$result.Add($ext) }
+        }
+        if ($result.Count -eq 0) {
+            Write-Log "Расширения не выбраны пользователем"
+        }
+    }
+    else {
+        for ($i = 0; $i -lt $AllExtensions.Count; $i++) {
+            $ext = $AllExtensions[$i]
+            $extName = [string]$ext.Name
+            $extFolder = [string]$ext.FolderName
+            if ((Test-NameHasPrefix -Name $extName -Prefix $ExcludePrefix) -or
+                (Test-NameHasPrefix -Name $extFolder -Prefix $ExcludePrefix)) {
+                continue
+            }
+            [void]$result.Add($ext)
+        }
+        if ($result.Count -eq 0) {
+            Write-Log "После фильтра по префиксу '$ExcludePrefix' расширений не осталось"
+        }
+    }
+
+    Write-Output -NoEnumerate $result
+}
+
 function Invoke-LoadExtensionsPipeline {
     param(
         [string]$Platform,
@@ -3747,49 +4101,10 @@ function Invoke-LoadExtensionsPipeline {
         [bool]$Dynamic
     )
 
-    $AllExtensions = Get-RepoExtensionInfos -RepoDir $RepoDir
-    if ($AllExtensions.Count -eq 0) {
-        Write-Log "В Git нет расширений с Configuration.xml (папка Extensions)"
-        return
-    }
-    Write-Log ("В Git найдено расширений: {0}" -f $AllExtensions.Count)
-
-    $ExtensionsToLoad = New-Object System.Collections.Generic.List[object]
-    if ($SelectManually) {
-        Set-ProgressCancelEnabled -Enabled $false
-        $pickerNames = New-Object System.Collections.Generic.List[string]
-        for ($i = 0; $i -lt $AllExtensions.Count; $i++) {
-            [void]$pickerNames.Add([string]$AllExtensions[$i].FolderName)
-        }
-        $selected = @(Show-ExtensionPicker -Extensions $pickerNames.ToArray() -ExcludePrefix $ExcludePrefix `
-            -PromptText "Отметьте расширения для загрузки в 1С:" -AcceptText "Загрузить выбранные")
-        Set-ProgressCancelEnabled -Enabled $true
-        Test-Cancelled
-        for ($i = 0; $i -lt $AllExtensions.Count; $i++) {
-            $ext = $AllExtensions[$i]
-            if ($selected -contains [string]$ext.FolderName) { [void]$ExtensionsToLoad.Add($ext) }
-        }
-        if ($ExtensionsToLoad.Count -eq 0) {
-            Write-Log "Загрузка расширений пропущена пользователем"
-            return
-        }
-    }
-    else {
-        for ($i = 0; $i -lt $AllExtensions.Count; $i++) {
-            $ext = $AllExtensions[$i]
-            $extName = [string]$ext.Name
-            $extFolder = [string]$ext.FolderName
-            if ((Test-NameHasPrefix -Name $extName -Prefix $ExcludePrefix) -or
-                (Test-NameHasPrefix -Name $extFolder -Prefix $ExcludePrefix)) {
-                continue
-            }
-            [void]$ExtensionsToLoad.Add($ext)
-        }
-        if ($ExtensionsToLoad.Count -eq 0) {
-            Write-Log "После фильтра по префиксу '$ExcludePrefix' расширений не осталось"
-            return
-        }
-    }
+    $ExtensionsToLoad = Select-RepoExtensions -RepoDir $RepoDir -SelectManually $SelectManually `
+        -ExcludePrefix $ExcludePrefix -PromptText "Отметьте расширения для загрузки в 1С:" `
+        -AcceptText "Загрузить выбранные"
+    if ($ExtensionsToLoad.Count -eq 0) { return }
 
     $Total = $ExtensionsToLoad.Count
     $failed = New-Object System.Collections.Generic.List[string]
@@ -3957,6 +4272,243 @@ function Invoke-DumpExtensionsPipeline {
     }
 }
 
+# === СБОРКА .cfe ИЗ ФАЙЛОВ РАСШИРЕНИЯ ===
+# Используется ibcmd (из папки bin выбранной платформы): ему не нужна клиентская лицензия,
+# в отличие от конфигуратора на файловой базе. База создаётся временная и всегда удаляется.
+function Get-IbcmdPath {
+    param([string]$PlatformPath)
+    $dir = Split-Path -Path $PlatformPath -Parent
+    $exe = Join-Path $dir "ibcmd.exe"
+    if (-not (Test-Path -LiteralPath $exe)) {
+        throw "Рядом с выбранным 1cv8.exe не найден ibcmd.exe ($exe). Он нужен для сборки .cfe — выберите платформу 8.3.14 или новее с установленными компонентами автономного сервера."
+    }
+    return $exe
+}
+
+function ConvertTo-SafeFileName {
+    param([string]$Text)
+    $safe = [regex]::Replace([string]$Text, '[\\/:*?"<>|\s]+', '-')
+    $safe = $safe.Trim('-', '.', ' ')
+    if (-not $safe) { $safe = "x" }
+    return $safe
+}
+
+function Format-IbcmdArg {
+    param([string]$Value)
+    if ($Value -match '\s') { return '"' + $Value + '"' }
+    return $Value
+}
+
+function Invoke-Ibcmd {
+    param(
+        [Parameter(Mandatory = $true)][string]$IbcmdExe,
+        [Parameter(Mandatory = $true)][string]$ArgumentString,
+        [string]$Platform = "",
+        [string]$Title = "ibcmd"
+    )
+
+    Write-Log "$Title"
+    Write-Log ("Команда ibcmd: " + $ArgumentString)
+    $r = Invoke-CancellableProcess -FileName $IbcmdExe -ArgumentString $ArgumentString -IgnoreExitCode -Quiet
+    $text = ((@($r.Stdout, $r.Stderr) | Where-Object { $_ }) -join "`r`n").Trim()
+    if ($text) { Write-Log $text }
+
+    if ($null -ne $r.ExitCode -and $r.ExitCode -ne 0) {
+        $formatMsg = Get-UnknownDumpFormatMessage -LogText $text -PlatformPath $Platform
+        if ($formatMsg) { throw $formatMsg }
+        $hint = $text
+        if (-not $hint) { $hint = "ibcmd завершился без текста ошибки." }
+        throw "${Title}: ошибка (код $($r.ExitCode)). $hint"
+    }
+}
+
+function Remove-TempDirectory {
+    param([string]$Path)
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return }
+    for ($try = 0; $try -lt 5; $try++) {
+        Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue
+        if (-not (Test-Path -LiteralPath $Path)) { return }
+        Start-Sleep -Milliseconds 300
+    }
+    Write-Log "Не удалось удалить временную папку: $Path"
+}
+
+# Собирает один .cfe во временной пустой файловой базе. Возвращает длительности этапов.
+function Build-ExtensionCfe {
+    param(
+        [string]$IbcmdExe,
+        [string]$Platform,
+        [string]$ExtensionName,
+        [string]$ExtensionPath,
+        [string]$OutFile
+    )
+
+    Test-Cancelled
+    $tmp = Join-Path $WorkDir ("tmp-cfe-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
+    $dataDir = Join-Path $tmp "data"
+    $dbDir = Join-Path $tmp "ib"
+    $tmpCfe = Join-Path $tmp "ext.cfe"
+    $short = $null
+    $createElapsed = [TimeSpan]::Zero
+    $importElapsed = [TimeSpan]::Zero
+    $saveElapsed = [TimeSpan]::Zero
+    $common = "--data=" + (Format-IbcmdArg -Value $dataDir) + " --db-path=" + (Format-IbcmdArg -Value $dbDir)
+
+    try {
+        New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+        Write-Log "Временная база: $tmp"
+
+        $t0 = Get-Date
+        Invoke-Ibcmd -IbcmdExe $IbcmdExe -Platform $Platform `
+            -Title "Создание временной базы" `
+            -ArgumentString ("infobase create $common --create-database")
+        $createElapsed = (Get-Date) - $t0
+
+        $short = Enter-ShortDumpPath -TargetPath $ExtensionPath
+        $t0 = Get-Date
+        Invoke-Ibcmd -IbcmdExe $IbcmdExe -Platform $Platform `
+            -Title "Загрузка файлов расширения '$ExtensionName' во временную базу" `
+            -ArgumentString ("config import $common --extension=" + (Format-IbcmdArg -Value $ExtensionName) + " " + (Format-IbcmdArg -Value $short.DumpPath))
+        $importElapsed = (Get-Date) - $t0
+
+        $t0 = Get-Date
+        Invoke-Ibcmd -IbcmdExe $IbcmdExe -Platform $Platform `
+            -Title "Сохранение расширения '$ExtensionName' в .cfe" `
+            -ArgumentString ("config save $common --extension=" + (Format-IbcmdArg -Value $ExtensionName) + " " + (Format-IbcmdArg -Value $tmpCfe))
+        $saveElapsed = (Get-Date) - $t0
+
+        if (-not (Test-Path -LiteralPath $tmpCfe) -or (Get-Item -LiteralPath $tmpCfe).Length -eq 0) {
+            throw "ibcmd не создал файл .cfe для расширения '$ExtensionName'"
+        }
+
+        $outDir = Split-Path -Path $OutFile -Parent
+        if (-not (Test-Path -LiteralPath $outDir)) {
+            New-Item -ItemType Directory -Path $outDir -Force | Out-Null
+        }
+        Move-Item -LiteralPath $tmpCfe -Destination $OutFile -Force
+    }
+    finally {
+        Exit-ShortDumpPath -Info $short
+        Remove-TempDirectory -Path $tmp
+    }
+
+    return [PSCustomObject]@{
+        CreateElapsed = $createElapsed
+        ImportElapsed = $importElapsed
+        SaveElapsed   = $saveElapsed
+    }
+}
+
+function Remove-OldCfeBuilds {
+    param([string]$Directory, [string]$ExtensionName, [string]$BranchName, [string]$KeepFile)
+    $prefix = [regex]::Escape((ConvertTo-SafeFileName -Text $ExtensionName) + "_" + (ConvertTo-SafeFileName -Text $BranchName))
+    $pattern = '^' + $prefix + '_\d{8}-\d{6}\.cfe$'
+    foreach ($f in @(Get-ChildItem -LiteralPath $Directory -Filter "*.cfe" -File -ErrorAction SilentlyContinue)) {
+        if ($f.Name -eq [System.IO.Path]::GetFileName($KeepFile)) { continue }
+        if ($f.Name -match $pattern) {
+            Remove-Item -LiteralPath $f.FullName -Force -ErrorAction SilentlyContinue
+            Write-Log "Удалена прежняя сборка: $($f.Name)"
+        }
+    }
+}
+
+function Invoke-BuildCfePipeline {
+    param(
+        [string]$Platform,
+        [string]$RepoDir,
+        [string]$BranchName,
+        [bool]$SelectManually,
+        [string]$ExcludePrefix,
+        [string]$OutDir
+    )
+
+    $selected = Select-RepoExtensions -RepoDir $RepoDir -SelectManually $SelectManually `
+        -ExcludePrefix $ExcludePrefix -PromptText "Отметьте расширения для сборки .cfe:" `
+        -AcceptText "Собрать выбранные"
+    if ($selected.Count -eq 0) { return $null }
+
+    $ibcmd = Get-IbcmdPath -PlatformPath $Platform
+    Write-Log "ibcmd: $ibcmd"
+
+    # остатки прерванных сборок
+    foreach ($stale in @(Get-ChildItem -LiteralPath $WorkDir -Directory -Filter "tmp-cfe-*" -ErrorAction SilentlyContinue)) {
+        Remove-TempDirectory -Path $stale.FullName
+    }
+
+    if (-not (Test-Path -LiteralPath $OutDir)) {
+        New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
+    }
+
+    $stamp = (Get-Date).ToString("yyyyMMdd-HHmmss")
+    $built = New-Object System.Collections.Generic.List[string]
+    $failed = New-Object System.Collections.Generic.List[string]
+    $createTotal = [TimeSpan]::Zero
+    $importTotal = [TimeSpan]::Zero
+    $saveTotal = [TimeSpan]::Zero
+    $total = $selected.Count
+
+    for ($index = 0; $index -lt $total; $index++) {
+        Test-Cancelled
+        $ext = $selected[$index]
+        $extName = [string]$ext.Name
+        $percent = 25 + [int]($index / $total * 70)
+        Set-Status -Text ("Сборка .cfe: {0} ({1} из {2})..." -f $extName, ($index + 1), $total) -Percent $percent
+        Write-Log ("Расширение '{0}' (папка '{1}')" -f $extName, $ext.FolderName)
+
+        if (-not (Test-DumpCatalogReady -Path ([string]$ext.Path))) {
+            Write-Log "Пропуск расширения '$extName': нет Configuration.xml в $($ext.Path)"
+            [void]$failed.Add($extName)
+            continue
+        }
+
+        $fileName = "{0}_{1}_{2}.cfe" -f (ConvertTo-SafeFileName -Text $extName), (ConvertTo-SafeFileName -Text $BranchName), $stamp
+        $outFile = Join-Path $OutDir $fileName
+        try {
+            $part = Build-ExtensionCfe -IbcmdExe $ibcmd -Platform $Platform `
+                -ExtensionName $extName -ExtensionPath ([string]$ext.Path) -OutFile $outFile
+            $createTotal += $part.CreateElapsed
+            $importTotal += $part.ImportElapsed
+            $saveTotal += $part.SaveElapsed
+            [void]$built.Add($outFile)
+            Write-Log ("Готов файл: {0} ({1:N0} КБ)" -f $outFile, ((Get-Item -LiteralPath $outFile).Length / 1KB))
+            Remove-OldCfeBuilds -Directory $OutDir -ExtensionName $extName -BranchName $BranchName -KeepFile $outFile
+        }
+        catch [System.OperationCanceledException] {
+            throw
+        }
+        catch {
+            if ("$_" -match 'Выгрузка записана в формате') { throw }
+            Write-Log "Ошибка сборки расширения '$extName': $_" "ERROR"
+            [void]$failed.Add($extName)
+        }
+    }
+
+    if ($failed.Count -gt 0) {
+        Write-Log ("Не собраны расширения: " + ($failed -join ", "))
+        if ($built.Count -eq 0) {
+            throw ("Не удалось собрать ни одного расширения. Подробности в журнале.")
+        }
+    }
+
+    return [PSCustomObject]@{
+        Files         = $built
+        Failed        = $failed
+        CreateElapsed = $createTotal
+        ImportElapsed = $importTotal
+        SaveElapsed   = $saveTotal
+    }
+}
+
+function Get-GitCurrentBranchName {
+    param([string]$GitExe, [string]$RepoDir, [string]$Fallback)
+    if (-not (Test-Path -LiteralPath (Join-Path $RepoDir ".git"))) { return $Fallback }
+    $r = Invoke-Git -GitExe $GitExe -WorkingDirectory $RepoDir `
+        -GitArgs @("rev-parse", "--abbrev-ref", "HEAD") -IgnoreExitCode -Quiet
+    $name = ([string]$r.Stdout).Trim()
+    if ($r.ExitCode -ne 0 -or -not $name -or $name -eq "HEAD") { return $Fallback }
+    return $name
+}
+
 function Invoke-SyncPipeline {
     param($Config)
 
@@ -4026,6 +4578,96 @@ function Invoke-SyncPipeline {
         )
         Write-TimingSummary -Text $timingText
         Set-TimingSummaryText -Text ($doneMessage + "`r`n`r`n" + $timingText)
+        return
+    }
+
+    if ($Action -eq "pull") {
+        Write-Log "Действие: обновить локальную ветку из удалённого репозитория"
+        Initialize-PortableGit -EmbeddedArchive $EmbeddedGit
+        Initialize-GitIdentity -GitExe $GitExe -GitHome $GitHome
+        $pull = Update-GitBranchFromOrigin -GitExe $GitExe -RepoDir $GitRepo `
+            -RemoteUrl $GitRepoUrl -Branch $GitBranch -GitHome $GitHome
+        Set-Status -Text "Готово!" -Percent 100
+        Write-Log "Операция успешно завершена"
+        $totalText = "Всего: " + (Format-ElapsedTime -Elapsed ((Get-Date) - $runStarted))
+        Write-Log $pull.Message
+        Write-Log $totalText
+        Set-TimingSummaryText -Text ($pull.Message + "`r`n`r`n" + $totalText)
+        return
+    }
+
+    if ($Action -eq "cfe") {
+        $CfeUpdateFirst = [bool]$Config.CfeUpdateFirst
+        $CfeSelectManually = [bool]$Config.CfeSelectManually
+        $CfeDir = Join-Path $WorkDir "cfe"
+        Write-Log "Действие: собрать .cfe из файлов расширений репозитория (обновить из Git: $CfeUpdateFirst)"
+
+        $pullTiming = $null
+        $pullMessage = $null
+        if ($CfeUpdateFirst) {
+            $gitStart = Get-Date
+            Initialize-PortableGit -EmbeddedArchive $EmbeddedGit
+            Initialize-GitIdentity -GitExe $GitExe -GitHome $GitHome
+            $pull = Update-GitBranchFromOrigin -GitExe $GitExe -RepoDir $GitRepo `
+                -RemoteUrl $GitRepoUrl -Branch $GitBranch -GitHome $GitHome
+            $pullMessage = $pull.Message
+            Write-Log $pullMessage
+            $pullTiming = New-OpTiming -StartedAt $gitStart -EndedAt (Get-Date)
+        }
+        elseif (Test-Path -LiteralPath $GitExe) {
+            Write-Log "Обновление из Git пропущено, используются локальные файлы"
+        }
+
+        if (-not (Test-Path -LiteralPath (Join-Path $GitRepo "Extensions"))) {
+            throw "В локальном репозитории нет папки Extensions. Нажмите «Обновить из Git» или включите флажок «Сначала обновить из Git»."
+        }
+
+        $branchName = $GitBranch
+        if (Test-Path -LiteralPath $GitExe) {
+            $branchName = Get-GitCurrentBranchName -GitExe $GitExe -RepoDir $GitRepo -Fallback $GitBranch
+        }
+        Write-Log "Ветка для имени файла: $branchName"
+        Set-Status -Text "Подготовка сборки .cfe..." -Percent 20
+
+        $built = Invoke-BuildCfePipeline -Platform $PlatformPath -RepoDir $GitRepo -BranchName $branchName `
+            -SelectManually $CfeSelectManually -ExcludePrefix $ExtensionExcludePrefix -OutDir $CfeDir
+        if (-not $built) {
+            Set-Status -Text "Сборка .cfe пропущена" -Percent 100
+            Set-TimingSummaryText -Text "Сборка .cfe пропущена: нет расширений для сборки."
+            return
+        }
+
+        Set-Status -Text "Сборка .cfe завершена" -Percent 100
+        Write-Log "Операция успешно завершена"
+
+        $doneLines = New-Object System.Collections.Generic.List[string]
+        if ($built.Files.Count -eq 1) { $doneLines.Add("Готово: " + $built.Files[0]) }
+        else {
+            $doneLines.Add("Собрано файлов: $($built.Files.Count). Папка: $CfeDir")
+        }
+        if ($built.Failed.Count -gt 0) {
+            $doneLines.Add("Не собраны: " + ($built.Failed -join ", "))
+        }
+        $timingText = Format-TimingSummary -StartedAt $runStarted -EndedAt (Get-Date) -Steps @(
+            (New-TimingStep -Name "Обновление из удалённого репозитория" -Timing $pullTiming),
+            (New-TimingStep -Name "Создание временных баз" -Timing (New-OpTiming -Elapsed $built.CreateElapsed)),
+            (New-TimingStep -Name "Загрузка файлов расширений" -Timing (New-OpTiming -Elapsed $built.ImportElapsed)),
+            (New-TimingStep -Name "Сохранение в .cfe" -Timing (New-OpTiming -Elapsed $built.SaveElapsed))
+        )
+        Write-TimingSummary -Text $timingText
+        Set-TimingSummaryText -Text (($doneLines -join "`r`n") + "`r`n`r`n" + $timingText)
+
+        try {
+            if ($built.Files.Count -eq 1) {
+                Start-Process -FilePath "explorer.exe" -ArgumentList ("/select,`"" + $built.Files[0] + "`"")
+            }
+            else {
+                Start-Process -FilePath "explorer.exe" -ArgumentList ("`"" + $CfeDir + "`"")
+            }
+        }
+        catch {
+            Write-Log "Не удалось открыть папку: $_"
+        }
         return
     }
 
