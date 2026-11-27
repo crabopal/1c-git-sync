@@ -154,7 +154,7 @@ $GitHome          = Join-Path $WorkDir "git-home"
 $GitRepo          = Join-Path $WorkDir "repo"
 $ConfigExportPath = Join-Path $GitRepo "Config"
 $ConfigPath       = Join-Path $WorkDir "config.json"
-$AppVersion       = "2.1.0"
+$AppVersion       = "2.1.1"
 $AppGitHubRepo    = "crabopal/1c-git-sync"
 
 # === ГЛОБАЛЬНЫЙ КОНТЕКСТ ПРОГРЕССА ===
@@ -315,10 +315,12 @@ function Invoke-CancellableProcess {
         [string[]]$ArgumentList = $null,
         [string]$WorkingDirectory = "",
         [switch]$IgnoreExitCode,
-        [switch]$Quiet
+        [switch]$Quiet,
+        [int]$TimeoutSec = 0
     )
 
     Test-Cancelled
+$startedAt = Get-Date
 
     if ($ArgumentList) {
         $ArgumentString = ConvertTo-ArgString -Parts $ArgumentList
@@ -345,6 +347,11 @@ function Invoke-CancellableProcess {
 
     while (-not $Proc.WaitForExit(40)) {
         [System.Windows.Forms.Application]::DoEvents()
+        if ($TimeoutSec -gt 0 -and ((Get-Date) - $startedAt).TotalSeconds -gt $TimeoutSec) {
+            Stop-TrackedProcess -Proc $Proc
+            $script:CurrentProcess = $null
+            throw "Превышено время ожидания ($TimeoutSec сек): процесс остановлен"
+        }
         if ($script:CancelRequested) {
             Stop-TrackedProcess -Proc $Proc
             $script:CurrentProcess = $null
@@ -763,6 +770,8 @@ function Get-DefaultConfig {
         DynamicUpdateCfg           = $false
         CfeUpdateFirst             = $true
         CfeSelectManually          = $false
+        CfeUseDesigner             = $true
+        CfeUseIbcmd                = $true
     }
 }
 
@@ -1612,11 +1621,16 @@ function Show-SettingsForm {
     $chkDynamic.Enabled = $chkUpdateDB.Checked
     $chkUpdateDB.Add_CheckedChanged({ $chkDynamic.Enabled = $chkUpdateDB.Checked })
 
-    $cfeCard = New-UiCard -Stack $stackLoad -Title "Сборка .cfe (папка workdir\cfe)" -BodyHeight 68
+    $cfeCard = New-UiCard -Stack $stackLoad -Title "Сборка .cfe (папка workdir\cfe)" -BodyHeight 132
     $chkCfeUpdate = New-UiCheckBox -Parent $cfeCard.Body -Text "Сначала обновить из Git" -Top 4 -Checked ([bool]$Existing.CfeUpdateFirst)
     $tip.SetToolTip($chkCfeUpdate, "Перед сборкой получить новые коммиты ветки из удалённого репозитория")
     $chkCfeManual = New-UiCheckBox -Parent $cfeCard.Body -Text "Выбрать расширения вручную (из папки Git)" -Top 36 -Checked ([bool]$Existing.CfeSelectManually)
     $tip.SetToolTip($chkCfeManual, "Без флажка собираются все расширения, кроме тех, имя которых начинается с префикса исключения (вкладка «Выгрузка»)")
+
+    $chkCfeDesigner = New-UiCheckBox -Parent $cfeCard.Body -Text "Собирать через конфигуратор (нужна лицензия 1С)" -Top 68 -Checked ([bool]$Existing.CfeUseDesigner)
+    $tip.SetToolTip($chkCfeDesigner, "Первый способ: временная файловая база и конфигуратор (/LoadConfigFromFiles, /DumpCfg)")
+    $chkCfeIbcmd = New-UiCheckBox -Parent $cfeCard.Body -Text "Собирать через ibcmd (если первый способ не сработал или отключён)" -Top 100 -Checked ([bool]$Existing.CfeUseIbcmd)
+    $tip.SetToolTip($chkCfeIbcmd, "Запасной способ: ibcmd.exe из папки платформы, клиентская лицензия не нужна")
 
     $btnLoad = New-UiButton -Parent $barLoad -Text "Загрузить в 1С" -Width 180 -Kind Primary
     $btnLoad.Left = 16
@@ -1940,6 +1954,8 @@ function Show-SettingsForm {
         ChkDynamic    = $chkDynamic
         ChkCfeUpdate  = $chkCfeUpdate
         ChkCfeManual  = $chkCfeManual
+        ChkCfeDesigner = $chkCfeDesigner
+        ChkCfeIbcmd   = $chkCfeIbcmd
     }
 
     $script:ProgressForm         = $form
@@ -2054,6 +2070,8 @@ function Read-UiConfig {
         DynamicUpdateCfg         = [bool]$ui.ChkDynamic.Checked
         CfeUpdateFirst           = [bool]$ui.ChkCfeUpdate.Checked
         CfeSelectManually        = [bool]$ui.ChkCfeManual.Checked
+        CfeUseDesigner           = [bool]$ui.ChkCfeDesigner.Checked
+        CfeUseIbcmd              = [bool]$ui.ChkCfeIbcmd.Checked
     }
 }
 
@@ -2079,6 +2097,8 @@ function Save-AppConfig {
         DynamicUpdateCfg         = $Config.DynamicUpdateCfg
         CfeUpdateFirst           = $Config.CfeUpdateFirst
         CfeSelectManually        = $Config.CfeSelectManually
+        CfeUseDesigner           = $Config.CfeUseDesigner
+        CfeUseIbcmd              = $Config.CfeUseIbcmd
     }
     $saved | ConvertTo-Json | Set-Content -Path $ConfigPath -Encoding UTF8
 }
@@ -2206,10 +2226,13 @@ function Test-Config {
 
     if ($action -eq "cfe") {
         if (-not $Config.PlatformPath) {
-            $errors += "Не указан путь к 1cv8.exe (рядом с ним должен быть ibcmd.exe)"
+            $errors += "Не указан путь к 1cv8.exe"
         }
         elseif (-not (Test-Path $Config.PlatformPath)) {
             $errors += "Файл 1cv8.exe не найден: $($Config.PlatformPath)"
+        }
+        if (-not $Config.CfeUseDesigner -and -not $Config.CfeUseIbcmd) {
+            $errors += "Для сборки .cfe отметьте хотя бы один способ: конфигуратор или ibcmd"
         }
     }
 
@@ -4309,7 +4332,7 @@ function Invoke-Ibcmd {
 
     Write-Log "$Title"
     Write-Log ("Команда ibcmd: " + $ArgumentString)
-    $r = Invoke-CancellableProcess -FileName $IbcmdExe -ArgumentString $ArgumentString -IgnoreExitCode -Quiet
+    $r = Invoke-CancellableProcess -FileName $IbcmdExe -ArgumentString $ArgumentString -IgnoreExitCode -Quiet -TimeoutSec 300
     $text = ((@($r.Stdout, $r.Stderr) | Where-Object { $_ }) -join "`r`n").Trim()
     if ($text) { Write-Log $text }
 
@@ -4333,63 +4356,74 @@ function Remove-TempDirectory {
     Write-Log "Не удалось удалить временную папку: $Path"
 }
 
-# Собирает один .cfe во временной пустой файловой базе. Возвращает длительности этапов.
-function Build-ExtensionCfe {
+# Создание временной пустой файловой базы конфигуратором (CREATEINFOBASE).
+function New-1CFileInfobase {
+    param([string]$Platform, [string]$BasePath)
+
+    Test-Cancelled
+    $outFile = Join-Path $WorkDir "1c_create_out.txt"
+    Remove-Item $outFile -Force -ErrorAction SilentlyContinue
+    $argLine = "CREATEINFOBASE File=`"$BasePath`" /DisableStartupDialogs /Out `"$outFile`""
+    Write-Log ("Команда 1С: " + $argLine)
+
+    $Psi = New-Object System.Diagnostics.ProcessStartInfo
+    $Psi.FileName = $Platform
+    $Psi.Arguments = $argLine
+    $Psi.UseShellExecute = $false
+    $Psi.CreateNoWindow = $true
+    $Proc = New-Object System.Diagnostics.Process
+    $Proc.StartInfo = $Psi
+    $Proc.Start() | Out-Null
+    $exitCode = Wait-CancellableProcess -Process $Proc
+
+    $logText = Read-1CLogFile -Path $outFile
+    if ($logText) { Write-Log $logText }
+    $created = Test-Path -LiteralPath (Join-Path $BasePath "1Cv8.1CD")
+    if (($null -ne $exitCode -and $exitCode -ne 0) -or -not $created) {
+        $hint = $logText
+        if (-not $hint) { $hint = "код $exitCode" }
+        throw "Не удалось создать временную базу: $hint"
+    }
+}
+
+# Способ 1: конфигуратор (нужна лицензия 1С, в том числе для файловой базы).
+function Invoke-CfeBuildDesigner {
     param(
-        [string]$IbcmdExe,
         [string]$Platform,
         [string]$ExtensionName,
         [string]$ExtensionPath,
-        [string]$OutFile
+        [string]$TempDir,
+        [string]$TempCfe
     )
 
-    Test-Cancelled
-    $tmp = Join-Path $WorkDir ("tmp-cfe-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
-    $dataDir = Join-Path $tmp "data"
-    $dbDir = Join-Path $tmp "ib"
-    $tmpCfe = Join-Path $tmp "ext.cfe"
+    $dbDir = Join-Path $TempDir "ib"
     $short = $null
     $createElapsed = [TimeSpan]::Zero
     $importElapsed = [TimeSpan]::Zero
     $saveElapsed = [TimeSpan]::Zero
-    $common = "--data=" + (Format-IbcmdArg -Value $dataDir) + " --db-path=" + (Format-IbcmdArg -Value $dbDir)
-
     try {
-        New-Item -ItemType Directory -Path $tmp -Force | Out-Null
-        Write-Log "Временная база: $tmp"
-
         $t0 = Get-Date
-        Invoke-Ibcmd -IbcmdExe $IbcmdExe -Platform $Platform `
-            -Title "Создание временной базы" `
-            -ArgumentString ("infobase create $common --create-database")
+        Write-Log "Создание временной базы (конфигуратор)"
+        New-1CFileInfobase -Platform $Platform -BasePath $dbDir
         $createElapsed = (Get-Date) - $t0
 
         $short = Enter-ShortDumpPath -TargetPath $ExtensionPath
+        $dumpArg = $short.DumpPath
+        if ($dumpArg -match '\s') { $dumpArg = "`"$dumpArg`"" }
         $t0 = Get-Date
-        Invoke-Ibcmd -IbcmdExe $IbcmdExe -Platform $Platform `
-            -Title "Загрузка файлов расширения '$ExtensionName' во временную базу" `
-            -ArgumentString ("config import $common --extension=" + (Format-IbcmdArg -Value $ExtensionName) + " " + (Format-IbcmdArg -Value $short.DumpPath))
+        Write-Log "Загрузка файлов расширения '$ExtensionName' во временную базу"
+        Invoke-1CDesigner -Platform $Platform -ArgumentString (
+            "DESIGNER /F `"$dbDir`" /LoadConfigFromFiles $dumpArg -Extension `"$ExtensionName`" -Format Hierarchical") | Out-Null
         $importElapsed = (Get-Date) - $t0
 
         $t0 = Get-Date
-        Invoke-Ibcmd -IbcmdExe $IbcmdExe -Platform $Platform `
-            -Title "Сохранение расширения '$ExtensionName' в .cfe" `
-            -ArgumentString ("config save $common --extension=" + (Format-IbcmdArg -Value $ExtensionName) + " " + (Format-IbcmdArg -Value $tmpCfe))
+        Write-Log "Сохранение расширения '$ExtensionName' в .cfe"
+        Invoke-1CDesigner -Platform $Platform -ArgumentString (
+            "DESIGNER /F `"$dbDir`" /DumpCfg `"$TempCfe`" -Extension `"$ExtensionName`"") | Out-Null
         $saveElapsed = (Get-Date) - $t0
-
-        if (-not (Test-Path -LiteralPath $tmpCfe) -or (Get-Item -LiteralPath $tmpCfe).Length -eq 0) {
-            throw "ibcmd не создал файл .cfe для расширения '$ExtensionName'"
-        }
-
-        $outDir = Split-Path -Path $OutFile -Parent
-        if (-not (Test-Path -LiteralPath $outDir)) {
-            New-Item -ItemType Directory -Path $outDir -Force | Out-Null
-        }
-        Move-Item -LiteralPath $tmpCfe -Destination $OutFile -Force
     }
     finally {
         Exit-ShortDumpPath -Info $short
-        Remove-TempDirectory -Path $tmp
     }
 
     return [PSCustomObject]@{
@@ -4397,6 +4431,128 @@ function Build-ExtensionCfe {
         ImportElapsed = $importElapsed
         SaveElapsed   = $saveElapsed
     }
+}
+
+# Способ 2: ibcmd (клиентская лицензия не нужна, но ibcmd есть не на каждой машине).
+function Invoke-CfeBuildIbcmd {
+    param(
+        [string]$Platform,
+        [string]$ExtensionName,
+        [string]$ExtensionPath,
+        [string]$TempDir,
+        [string]$TempCfe
+    )
+
+    $ibcmd = Get-IbcmdPath -PlatformPath $Platform
+    $dataDir = Join-Path $TempDir "data"
+    $dbDir = Join-Path $TempDir "ib"
+    $common = "--data=" + (Format-IbcmdArg -Value $dataDir) + " --db-path=" + (Format-IbcmdArg -Value $dbDir)
+    $short = $null
+    $createElapsed = [TimeSpan]::Zero
+    $importElapsed = [TimeSpan]::Zero
+    $saveElapsed = [TimeSpan]::Zero
+    try {
+        $t0 = Get-Date
+        Invoke-Ibcmd -IbcmdExe $ibcmd -Platform $Platform -Title "Создание временной базы (ibcmd)" `
+            -ArgumentString ("infobase create $common --create-database")
+        $createElapsed = (Get-Date) - $t0
+
+        $short = Enter-ShortDumpPath -TargetPath $ExtensionPath
+        $t0 = Get-Date
+        Invoke-Ibcmd -IbcmdExe $ibcmd -Platform $Platform `
+            -Title "Загрузка файлов расширения '$ExtensionName' во временную базу" `
+            -ArgumentString ("config import $common --extension=" + (Format-IbcmdArg -Value $ExtensionName) + " " + (Format-IbcmdArg -Value $short.DumpPath))
+        $importElapsed = (Get-Date) - $t0
+
+        $t0 = Get-Date
+        Invoke-Ibcmd -IbcmdExe $ibcmd -Platform $Platform `
+            -Title "Сохранение расширения '$ExtensionName' в .cfe" `
+            -ArgumentString ("config save $common --extension=" + (Format-IbcmdArg -Value $ExtensionName) + " " + (Format-IbcmdArg -Value $TempCfe))
+        $saveElapsed = (Get-Date) - $t0
+    }
+    finally {
+        Exit-ShortDumpPath -Info $short
+    }
+
+    return [PSCustomObject]@{
+        CreateElapsed = $createElapsed
+        ImportElapsed = $importElapsed
+        SaveElapsed   = $saveElapsed
+    }
+}
+
+# Собирает один .cfe во временной пустой файловой базе: сначала конфигуратором, затем ibcmd.
+# Каждая попытка работает в своей временной папке, которая всегда удаляется.
+function Build-ExtensionCfe {
+    param(
+        [string]$Platform,
+        [string]$ExtensionName,
+        [string]$ExtensionPath,
+        [string]$OutFile,
+        [bool]$UseDesigner,
+        [bool]$UseIbcmd
+    )
+
+    $methods = New-Object System.Collections.Generic.List[string]
+    if ($UseDesigner) { [void]$methods.Add("designer") }
+    # ibcmd иногда аварийно завершается на больших расширениях, поэтому одна повторная попытка
+    if ($UseIbcmd) { [void]$methods.Add("ibcmd"); [void]$methods.Add("ibcmd") }
+    if ($methods.Count -eq 0) { throw "Не выбран ни один способ сборки .cfe" }
+
+    $errors = New-Object System.Collections.Generic.List[string]
+    for ($m = 0; $m -lt $methods.Count; $m++) {
+        Test-Cancelled
+        $method = $methods[$m]
+        $label = if ($method -eq "designer") { "конфигуратор" } else { "ibcmd" }
+        $tmp = Join-Path $WorkDir ("tmp-cfe-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
+        $tmpCfe = Join-Path $tmp "ext.cfe"
+        try {
+            New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+            Write-Log "Сборка способом «$label», временная папка: $tmp"
+
+            if ($method -eq "designer") {
+                $r = Invoke-CfeBuildDesigner -Platform $Platform -ExtensionName $ExtensionName `
+                    -ExtensionPath $ExtensionPath -TempDir $tmp -TempCfe $tmpCfe
+            }
+            else {
+                $r = Invoke-CfeBuildIbcmd -Platform $Platform -ExtensionName $ExtensionName `
+                    -ExtensionPath $ExtensionPath -TempDir $tmp -TempCfe $tmpCfe
+            }
+
+            if (-not (Test-Path -LiteralPath $tmpCfe) -or (Get-Item -LiteralPath $tmpCfe).Length -eq 0) {
+                throw "не создан файл .cfe"
+            }
+
+            $outDir = Split-Path -Path $OutFile -Parent
+            if (-not (Test-Path -LiteralPath $outDir)) {
+                New-Item -ItemType Directory -Path $outDir -Force | Out-Null
+            }
+            Move-Item -LiteralPath $tmpCfe -Destination $OutFile -Force
+
+            return [PSCustomObject]@{
+                Method        = $label
+                CreateElapsed = $r.CreateElapsed
+                ImportElapsed = $r.ImportElapsed
+                SaveElapsed   = $r.SaveElapsed
+            }
+        }
+        catch [System.OperationCanceledException] {
+            throw
+        }
+        catch {
+            if ("$_" -match 'Выгрузка записана в формате') { throw }
+            Write-Log "Способ «$label» не сработал: $_" "ERROR"
+            $sameNext = ($m -lt $methods.Count - 1) -and ($methods[$m + 1] -eq $method)
+            if (-not $sameNext) { [void]$errors.Add("${label}: $_") }
+            if ($sameNext) { Write-Log "Повторяем попытку ($label)" }
+            elseif ($m -lt $methods.Count - 1) { Write-Log "Пробуем следующий способ" }
+        }
+        finally {
+            Remove-TempDirectory -Path $tmp
+        }
+    }
+
+    throw ("Не удалось собрать .cfe:`r`n" + ($errors -join "`r`n"))
 }
 
 function Remove-OldCfeBuilds {
@@ -4419,16 +4575,15 @@ function Invoke-BuildCfePipeline {
         [string]$BranchName,
         [bool]$SelectManually,
         [string]$ExcludePrefix,
-        [string]$OutDir
+        [string]$OutDir,
+        [bool]$UseDesigner,
+        [bool]$UseIbcmd
     )
 
     $selected = Select-RepoExtensions -RepoDir $RepoDir -SelectManually $SelectManually `
         -ExcludePrefix $ExcludePrefix -PromptText "Отметьте расширения для сборки .cfe:" `
         -AcceptText "Собрать выбранные"
     if ($selected.Count -eq 0) { return $null }
-
-    $ibcmd = Get-IbcmdPath -PlatformPath $Platform
-    Write-Log "ibcmd: $ibcmd"
 
     # остатки прерванных сборок
     foreach ($stale in @(Get-ChildItem -LiteralPath $WorkDir -Directory -Filter "tmp-cfe-*" -ErrorAction SilentlyContinue)) {
@@ -4445,6 +4600,8 @@ function Invoke-BuildCfePipeline {
     $createTotal = [TimeSpan]::Zero
     $importTotal = [TimeSpan]::Zero
     $saveTotal = [TimeSpan]::Zero
+    $methodsUsed = New-Object System.Collections.Generic.List[string]
+    $lastError = ""
     $total = $selected.Count
 
     for ($index = 0; $index -lt $total; $index++) {
@@ -4464,13 +4621,15 @@ function Invoke-BuildCfePipeline {
         $fileName = "{0}_{1}_{2}.cfe" -f (ConvertTo-SafeFileName -Text $extName), (ConvertTo-SafeFileName -Text $BranchName), $stamp
         $outFile = Join-Path $OutDir $fileName
         try {
-            $part = Build-ExtensionCfe -IbcmdExe $ibcmd -Platform $Platform `
-                -ExtensionName $extName -ExtensionPath ([string]$ext.Path) -OutFile $outFile
+            $part = Build-ExtensionCfe -Platform $Platform `
+                -ExtensionName $extName -ExtensionPath ([string]$ext.Path) -OutFile $outFile `
+                -UseDesigner $UseDesigner -UseIbcmd $UseIbcmd
             $createTotal += $part.CreateElapsed
             $importTotal += $part.ImportElapsed
             $saveTotal += $part.SaveElapsed
             [void]$built.Add($outFile)
-            Write-Log ("Готов файл: {0} ({1:N0} КБ)" -f $outFile, ((Get-Item -LiteralPath $outFile).Length / 1KB))
+            if ($methodsUsed -notcontains $part.Method) { [void]$methodsUsed.Add($part.Method) }
+            Write-Log (("Готов файл (способ: " + $part.Method + "): {0} ({1:N0} КБ)") -f $outFile, ((Get-Item -LiteralPath $outFile).Length / 1KB))
             Remove-OldCfeBuilds -Directory $OutDir -ExtensionName $extName -BranchName $BranchName -KeepFile $outFile
         }
         catch [System.OperationCanceledException] {
@@ -4479,6 +4638,7 @@ function Invoke-BuildCfePipeline {
         catch {
             if ("$_" -match 'Выгрузка записана в формате') { throw }
             Write-Log "Ошибка сборки расширения '$extName': $_" "ERROR"
+            $lastError = "$_"
             [void]$failed.Add($extName)
         }
     }
@@ -4486,13 +4646,14 @@ function Invoke-BuildCfePipeline {
     if ($failed.Count -gt 0) {
         Write-Log ("Не собраны расширения: " + ($failed -join ", "))
         if ($built.Count -eq 0) {
-            throw ("Не удалось собрать ни одного расширения. Подробности в журнале.")
+            throw ("Не удалось собрать ни одного расширения." + $(if ($lastError) { "$([Environment]::NewLine)$lastError" } else { "" }))
         }
     }
 
     return [PSCustomObject]@{
         Files         = $built
         Failed        = $failed
+        Methods       = $methodsUsed
         CreateElapsed = $createTotal
         ImportElapsed = $importTotal
         SaveElapsed   = $saveTotal
@@ -4599,6 +4760,8 @@ function Invoke-SyncPipeline {
     if ($Action -eq "cfe") {
         $CfeUpdateFirst = [bool]$Config.CfeUpdateFirst
         $CfeSelectManually = [bool]$Config.CfeSelectManually
+        $CfeUseDesigner = [bool]$Config.CfeUseDesigner
+        $CfeUseIbcmd = [bool]$Config.CfeUseIbcmd
         $CfeDir = Join-Path $WorkDir "cfe"
         Write-Log "Действие: собрать .cfe из файлов расширений репозитория (обновить из Git: $CfeUpdateFirst)"
 
@@ -4630,7 +4793,8 @@ function Invoke-SyncPipeline {
         Set-Status -Text "Подготовка сборки .cfe..." -Percent 20
 
         $built = Invoke-BuildCfePipeline -Platform $PlatformPath -RepoDir $GitRepo -BranchName $branchName `
-            -SelectManually $CfeSelectManually -ExcludePrefix $ExtensionExcludePrefix -OutDir $CfeDir
+            -SelectManually $CfeSelectManually -ExcludePrefix $ExtensionExcludePrefix -OutDir $CfeDir `
+            -UseDesigner $CfeUseDesigner -UseIbcmd $CfeUseIbcmd
         if (-not $built) {
             Set-Status -Text "Сборка .cfe пропущена" -Percent 100
             Set-TimingSummaryText -Text "Сборка .cfe пропущена: нет расширений для сборки."
@@ -4645,6 +4809,7 @@ function Invoke-SyncPipeline {
         else {
             $doneLines.Add("Собрано файлов: $($built.Files.Count). Папка: $CfeDir")
         }
+        $doneLines.Add("Способ сборки: " + ($built.Methods -join ", "))
         if ($built.Failed.Count -gt 0) {
             $doneLines.Add("Не собраны: " + ($built.Failed -join ", "))
         }
