@@ -154,7 +154,7 @@ $GitHome          = Join-Path $WorkDir "git-home"
 $GitRepo          = Join-Path $WorkDir "repo"
 $ConfigExportPath = Join-Path $GitRepo "Config"
 $ConfigPath       = Join-Path $WorkDir "config.json"
-$AppVersion       = "2.1.1"
+$AppVersion       = "2.1.2"
 $AppGitHubRepo    = "crabopal/1c-git-sync"
 
 # === ГЛОБАЛЬНЫЙ КОНТЕКСТ ПРОГРЕССА ===
@@ -4079,8 +4079,14 @@ function Select-RepoExtensions {
         for ($i = 0; $i -lt $AllExtensions.Count; $i++) {
             [void]$pickerNames.Add([string]$AllExtensions[$i].FolderName)
         }
-        $selected = @(Show-ExtensionPicker -Extensions $pickerNames.ToArray() -ExcludePrefix $ExcludePrefix `
-            -PromptText $PromptText -AcceptText $AcceptText)
+        # Show-ExtensionPicker возвращает массив как единый объект (,$selected): без @(...) вокруг вызова,
+        # иначе получится вложенный массив и -contains никогда не найдёт имя
+        $picked = Show-ExtensionPicker -Extensions $pickerNames.ToArray() -ExcludePrefix $ExcludePrefix `
+            -PromptText $PromptText -AcceptText $AcceptText
+        $selected = New-Object System.Collections.Generic.List[string]
+        foreach ($item in $picked) {
+            foreach ($name in @($item)) { [void]$selected.Add([string]$name) }
+        }
         Set-ProgressCancelEnabled -Enabled $true
         Test-Cancelled
         for ($i = 0; $i -lt $AllExtensions.Count; $i++) {
